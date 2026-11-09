@@ -1,0 +1,128 @@
+package org.datamatrix.linereader;
+
+import android.Manifest;
+import android.app.Activity;
+import android.content.*;
+import android.content.pm.PackageManager;
+import android.graphics.*;
+import android.hardware.camera2.*;
+import android.hardware.camera2.params.MeteringRectangle;
+import android.media.*;
+import android.os.*;
+import android.util.*;
+import android.view.*;
+import android.widget.*;
+import java.nio.ByteBuffer;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+public final class MainActivity extends Activity {
+    TextureView texture;FrameLayout viewport;Overlay overlay;TextView result,status;Button light;
+    HandlerThread thread;Handler cameraHandler;final Handler ui=new Handler(Looper.getMainLooper());
+    final ExecutorService decoder=Executors.newSingleThreadExecutor();final AtomicBoolean analyzing=new AtomicBoolean();
+    CameraDevice camera;CameraCaptureSession session;ImageReader images;CaptureRequest.Builder request;
+    CameraCharacteristics info;Size size;Rect activeArray;Surface previewSurface;float sensorZoom=1.5f;volatile Rect crop;volatile boolean resumed,torch;
+    volatile int generation;long lastFrame,metricsStart;int deliveredFrames;boolean opening;long successUntil;
+    volatile boolean qrMode;volatile int modeEpoch;
+    int squareScale=1;
+    @Override public void onCreate(Bundle saved){super.onCreate(saved);getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        qrMode=getSharedPreferences("scanner",0).getBoolean("qr_mode",false);
+        squareScale=Math.max(1,Math.min(3,getSharedPreferences("scanner",0).getInt("square_scale",1)));
+        LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setBackgroundColor(Color.BLACK);
+        TextView title=new TextView(this);title.setText("PCB Line Reader — place code inside square");title.setTextColor(Color.WHITE);title.setPadding(16,12,16,12);root.addView(title);
+        RadioGroup formats=new RadioGroup(this);formats.setOrientation(RadioGroup.HORIZONTAL);
+        RadioButton dataMatrix=new RadioButton(this);dataMatrix.setId(View.generateViewId());dataMatrix.setText("DataMatrix");dataMatrix.setTextColor(Color.WHITE);
+        RadioButton qr=new RadioButton(this);qr.setId(View.generateViewId());qr.setText("QR");qr.setTextColor(Color.WHITE);
+        dataMatrix.setButtonTintList(android.content.res.ColorStateList.valueOf(Color.CYAN));qr.setButtonTintList(android.content.res.ColorStateList.valueOf(Color.CYAN));
+        formats.addView(dataMatrix,new RadioGroup.LayoutParams(0,-2,1));formats.addView(qr,new RadioGroup.LayoutParams(0,-2,1));formats.check(qrMode?qr.getId():dataMatrix.getId());root.addView(formats);
+        RadioGroup sizes=new RadioGroup(this);sizes.setOrientation(RadioGroup.HORIZONTAL);int[] sizeIds=new int[3];
+        for(int i=0;i<3;i++){RadioButton option=new RadioButton(this);sizeIds[i]=View.generateViewId();option.setId(sizeIds[i]);option.setText("Square "+(i+1)+"x");option.setTextColor(Color.WHITE);option.setButtonTintList(android.content.res.ColorStateList.valueOf(Color.CYAN));sizes.addView(option,new RadioGroup.LayoutParams(0,-2,1));}
+        sizes.check(sizeIds[squareScale-1]);root.addView(sizes);
+        viewport=new FrameLayout(this);texture=new TextureView(this);overlay=new Overlay(this);viewport.addView(texture);viewport.addView(overlay);root.addView(viewport,new LinearLayout.LayoutParams(-1,0,1));
+        result=new TextView(this);result.setText("No code read yet");result.setTextColor(Color.GREEN);result.setTextSize(20);result.setTextIsSelectable(true);result.setPadding(16,8,16,8);result.setMaxLines(3);result.setMinLines(3);root.addView(result);
+        status=new TextView(this);status.setTextColor(Color.WHITE);status.setPadding(16,4,16,4);status.setLines(1);root.addView(status);
+        LinearLayout buttons=new LinearLayout(this);Button focus=new Button(this);focus.setText("Focus");focus.setOnClickListener(v->focus());buttons.addView(focus,new LinearLayout.LayoutParams(0,-2,1));
+        light=new Button(this);light.setText("Light on");light.setOnClickListener(v->{torch=!torch;updateRequest();light.setText(torch?"Light off":"Light on");});buttons.addView(light,new LinearLayout.LayoutParams(0,-2,1));root.addView(buttons);setContentView(root);
+        formats.setOnCheckedChangeListener((group,checked)->{qrMode=checked==qr.getId();modeEpoch++;successUntil=0;result.setText("No code read yet");status.setText((qrMode?"QR":"DataMatrix")+" - reading inside square only");overlay.invalidate();getSharedPreferences("scanner",0).edit().putBoolean("qr_mode",qrMode).apply();});
+        sizes.setOnCheckedChangeListener((group,checked)->{for(int i=0;i<3;i++)if(checked==sizeIds[i])squareScale=i+1;modeEpoch++;successUntil=0;result.setText("No code read yet");status.setText((qrMode?"QR":"DataMatrix")+" - square "+squareScale+"x");mapping();overlay.invalidate();getSharedPreferences("scanner",0).edit().putInt("square_scale",squareScale).apply();});
+        texture.setSurfaceTextureListener(new TextureView.SurfaceTextureListener(){public void onSurfaceTextureAvailable(SurfaceTexture t,int w,int h){open();}public void onSurfaceTextureSizeChanged(SurfaceTexture t,int w,int h){mapping();}public boolean onSurfaceTextureDestroyed(SurfaceTexture t){return true;}public void onSurfaceTextureUpdated(SurfaceTexture t){}});
+        viewport.addOnLayoutChangeListener((v,a,b,c,d,e,f,g,h)->mapping());
+        if(checkSelfPermission(Manifest.permission.CAMERA)!=PackageManager.PERMISSION_GRANTED)requestPermissions(new String[]{Manifest.permission.CAMERA},1);
+    }
+    @Override public void onRequestPermissionsResult(int code,String[] permissions,int[] grants){super.onRequestPermissionsResult(code,permissions,grants);if(code==1&&grants.length>0&&grants[0]==PackageManager.PERMISSION_GRANTED)open();else status.setText("Camera permission required");}
+    @Override protected void onResume(){super.onResume();resumed=true;thread=new HandlerThread("LineCamera");thread.start();cameraHandler=new Handler(thread.getLooper());open();}
+    @Override protected void onPause(){resumed=false;generation++;opening=false;crop=null;if(session!=null){session.close();session=null;}if(camera!=null){camera.close();camera=null;}if(images!=null){images.close();images=null;}if(previewSurface!=null){previewSurface.release();previewSurface=null;}if(thread!=null)thread.quitSafely();super.onPause();}
+    @Override protected void onDestroy(){decoder.shutdownNow();super.onDestroy();}
+    void error(String message){ui.post(()->status.setText(message));}
+    void open(){if(!resumed||cameraHandler==null||!texture.isAvailable()||camera!=null||opening||checkSelfPermission(Manifest.permission.CAMERA)!=PackageManager.PERMISSION_GRANTED)return;
+        opening=true;final int ticket=++generation;
+        try{CameraManager manager=(CameraManager)getSystemService(CAMERA_SERVICE);String id=null;
+            for(String candidate:manager.getCameraIdList()){CameraCharacteristics c=manager.getCameraCharacteristics(candidate);if(Objects.equals(c.get(CameraCharacteristics.LENS_FACING),CameraCharacteristics.LENS_FACING_BACK)){id=candidate;info=c;break;}}
+            if(id==null)throw new IllegalStateException("No rear camera");
+            Size[] supported=info.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP).getOutputSizes(ImageFormat.YUV_420_888);
+            List<Size> previewSizes=Arrays.asList(info.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP).getOutputSizes(SurfaceTexture.class));
+            size=null;long distance=Long.MAX_VALUE;
+            for(Size value:supported){long diff=Math.abs((long)value.getWidth()*value.getHeight()-1920L*1080);if(previewSizes.contains(value)&&diff<distance){size=value;distance=diff;}}
+            if(size==null)throw new IllegalStateException("No compatible preview size");
+            activeArray=info.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
+            Float maxZoom=info.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM);sensorZoom=Math.min(1.5f,maxZoom==null?1f:maxZoom);
+            light.setEnabled(Boolean.TRUE.equals(info.get(CameraCharacteristics.FLASH_INFO_AVAILABLE)));
+            images=ImageReader.newInstance(size.getWidth(),size.getHeight(),ImageFormat.YUV_420_888,3);images.setOnImageAvailableListener(r->frame(r,ticket),cameraHandler);
+            manager.openCamera(id,new CameraDevice.StateCallback(){public void onOpened(CameraDevice c){if(!resumed||ticket!=generation){c.close();return;}camera=c;opening=false;createSession(ticket);}public void onDisconnected(CameraDevice c){c.close();if(c==camera)camera=null;opening=false;error("Camera disconnected");}public void onError(CameraDevice c,int code){onDisconnected(c);error("Camera error "+code);}},cameraHandler);
+        }catch(Exception e){opening=false;error("Camera: "+e.getMessage());}
+    }
+    void createSession(int ticket){try{
+        texture.getSurfaceTexture().setDefaultBufferSize(size.getWidth(),size.getHeight());previewSurface=new Surface(texture.getSurfaceTexture());
+        request=camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);request.addTarget(previewSurface);request.addTarget(images.getSurface());
+        camera.createCaptureSession(Arrays.asList(previewSurface,images.getSurface()),new CameraCaptureSession.StateCallback(){public void onConfigured(CameraCaptureSession s){if(!resumed||ticket!=generation){s.close();return;}session=s;updateRequest();ui.post(()->{mapping();status.setText("Reading inside square only");});}public void onConfigureFailed(CameraCaptureSession s){error("Camera configuration failed");}},cameraHandler);
+    }catch(Exception e){error(e.getMessage());}}
+    void updateRequest(){Handler handler=cameraHandler;if(handler==null)return;handler.post(()->{if(session==null||!resumed)return;try{
+        request.set(CaptureRequest.CONTROL_AE_MODE,CaptureRequest.CONTROL_AE_MODE_ON);
+        int cw=(int)(activeArray.width()/sensorZoom),ch=(int)(activeArray.height()/sensorZoom);cw-=cw%2;ch-=ch%2;
+        request.set(CaptureRequest.SCALER_CROP_REGION,new Rect(activeArray.centerX()-cw/2,activeArray.centerY()-ch/2,activeArray.centerX()+cw/2,activeArray.centerY()+ch/2));
+        if(Build.VERSION.SDK_INT>=31){int[] available=info.get(CameraCharacteristics.SCALER_AVAILABLE_ROTATE_AND_CROP_MODES);if(available!=null)for(int mode:available)if(mode==CaptureRequest.SCALER_ROTATE_AND_CROP_NONE)request.set(CaptureRequest.SCALER_ROTATE_AND_CROP,mode);}
+        int[] modes=info.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES);boolean continuous=false;for(int m:modes)if(m==CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)continuous=true;
+        request.set(CaptureRequest.CONTROL_AF_MODE,continuous?CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE:CaptureRequest.CONTROL_AF_MODE_AUTO);
+        request.set(CaptureRequest.CONTROL_AF_TRIGGER,CaptureRequest.CONTROL_AF_TRIGGER_IDLE);
+        request.set(CaptureRequest.FLASH_MODE,torch?CaptureRequest.FLASH_MODE_TORCH:CaptureRequest.FLASH_MODE_OFF);
+        Integer count=info.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF);if(count!=null&&count>0){int side=Math.min(activeArray.width(),activeArray.height())/5;request.set(CaptureRequest.CONTROL_AF_REGIONS,new MeteringRectangle[]{new MeteringRectangle(activeArray.centerX()-side/2,activeArray.centerY()-side/2,side,side,1000)});}
+        session.setRepeatingRequest(request.build(),null,cameraHandler);
+    }catch(Exception e){error(e.getMessage());}});}
+    void focus(){if(cameraHandler==null)return;cameraHandler.post(()->{if(session==null)return;try{request.set(CaptureRequest.CONTROL_AF_MODE,CaptureRequest.CONTROL_AF_MODE_AUTO);request.set(CaptureRequest.CONTROL_AF_TRIGGER,CaptureRequest.CONTROL_AF_TRIGGER_START);session.capture(request.build(),null,cameraHandler);request.set(CaptureRequest.CONTROL_AF_TRIGGER,CaptureRequest.CONTROL_AF_TRIGGER_IDLE);session.setRepeatingRequest(request.build(),null,cameraHandler);}catch(Exception e){error(e.getMessage());}});}
+    RectF square(){float side=Math.min(viewport.getWidth(),viewport.getHeight())*.135f*squareScale;return new RectF((viewport.getWidth()-side)/2,(viewport.getHeight()-side)/2,(viewport.getWidth()+side)/2,(viewport.getHeight()+side)/2);}
+    void mapping(){if(size==null||viewport.getWidth()==0||viewport.getHeight()==0)return;
+        int rotation=info.get(CameraCharacteristics.SENSOR_ORIENTATION);int display=getWindowManager().getDefaultDisplay().getRotation()*90;rotation=(rotation-display+360)%360;
+        float w=size.getWidth(),h=size.getHeight(),vw=viewport.getWidth(),vh=viewport.getHeight();Matrix bufferToView=new Matrix();bufferToView.postTranslate(-w/2,-h/2);bufferToView.postRotate(rotation);float scale=Math.max(vw/(rotation%180==0?w:h),vh/(rotation%180==0?h:w));bufferToView.postScale(scale,scale);bufferToView.postTranslate(vw/2,vh/2);
+        // Both outputs have the same native size/crop. Account for the default
+        // sensor-oriented TextureView surface before applying aspect correction.
+        int baseRotation=info.get(CameraCharacteristics.SENSOR_ORIENTATION);
+        float rw=baseRotation%180==0?w:h,rh=baseRotation%180==0?h:w;
+        Matrix surface=new Matrix();surface.postTranslate(-w/2,-h/2);surface.postRotate(baseRotation);surface.postScale(vw/rw,vh/rh);surface.postTranslate(vw/2,vh/2);
+        float[] src={0,0,w,0,0,h},dst=src.clone();surface.mapPoints(src);bufferToView.mapPoints(dst);
+        Matrix transform=new Matrix();transform.setPolyToPoly(src,0,dst,0,3);texture.setTransform(transform);
+        Matrix inverse=new Matrix();if(!bufferToView.invert(inverse))return;RectF roi=square();inverse.mapRect(roi);crop=new Rect(Math.max(0,(int)Math.ceil(roi.left)),Math.max(0,(int)Math.ceil(roi.top)),Math.min((int)w,(int)Math.floor(roi.right)),Math.min((int)h,(int)Math.floor(roi.bottom)));overlay.invalidate();
+    }
+    void frame(ImageReader reader,int ticket){Image image=null;try{
+        image=reader.acquireLatestImage();if(image==null)return;
+        long frameNow=SystemClock.elapsedRealtime();if(metricsStart==0)metricsStart=frameNow;deliveredFrames++;
+        if(frameNow-metricsStart>=3000){android.util.Log.i("LineCamera","capture_fps="+(1000.0*deliveredFrames/(frameNow-metricsStart))+" size="+size+" crop="+crop+" zoom="+sensorZoom);metricsStart=frameNow;deliveredFrames=0;}
+        final int frameModeEpoch=modeEpoch;final boolean frameQr=qrMode;
+        Rect roi=crop;long now=frameNow;if(ticket!=generation||!resumed||roi==null||roi.width()<32||roi.height()<32||now-lastFrame<200)return;lastFrame=now;
+        byte[] pixels=new byte[roi.width()*roi.height()];Image.Plane plane=image.getPlanes()[0];ByteBuffer source=plane.getBuffer();int stride=plane.getRowStride(),pixelStride=plane.getPixelStride();for(int y=0;y<roi.height();y++)for(int x=0;x<roi.width();x++)pixels[y*roi.width()+x]=source.get((roi.top+y)*stride+(roi.left+x)*pixelStride);
+        java.io.File snapshot=new java.io.File(getFilesDir(),"capture_scan");
+        if(snapshot.exists()&&snapshot.delete()){
+            try(java.io.FileOutputStream out=openFileOutput("scan_roi.pgm",MODE_PRIVATE)){out.write(("P5\n"+roi.width()+" "+roi.height()+"\n255\n").getBytes(java.nio.charset.StandardCharsets.US_ASCII));out.write(pixels);}
+            try(java.io.FileOutputStream out=openFileOutput("scan_frame.pgm",MODE_PRIVATE)){out.write(("P5\n"+image.getWidth()+" "+image.getHeight()+"\n255\n").getBytes(java.nio.charset.StandardCharsets.US_ASCII));byte[] row=new byte[image.getWidth()];for(int y=0;y<image.getHeight();y++){for(int x=0;x<row.length;x++)row[x]=source.get(y*stride+x*pixelStride);out.write(row);}}
+            try(java.io.FileOutputStream out=openFileOutput("scan_info.txt",MODE_PRIVATE)){out.write(("crop="+roi+" size="+size+" sensor_rotation="+info.get(CameraCharacteristics.SENSOR_ORIENTATION)).getBytes(java.nio.charset.StandardCharsets.UTF_8));}
+        }
+        if(!analyzing.compareAndSet(false,true))return;
+        final boolean scanQr=frameQr;final int scanModeEpoch=frameModeEpoch;
+        decoder.execute(()->{try{
+            String value=LineDecoder.decode(pixels,roi.width(),roi.height(),scanQr?com.google.zxing.BarcodeFormat.QR_CODE:com.google.zxing.BarcodeFormat.DATA_MATRIX);
+            if(value==null&&!scanQr)value=MarkedDecoder.decode(this,pixels,roi.width(),roi.height());
+            if(value!=null){final String decoded=value;ui.post(()->{if(!resumed||ticket!=generation||scanModeEpoch!=modeEpoch)return;result.setText(decoded);status.setText((scanQr?"QR":"DataMatrix")+" read at "+new java.text.SimpleDateFormat("HH:mm:ss",Locale.US).format(new Date()));successUntil=SystemClock.elapsedRealtime()+700;overlay.invalidate();ui.postDelayed(()->overlay.invalidate(),750);});}
+        }catch(Exception e){android.util.Log.e("LineDecode","Frame decode failed",e);}finally{analyzing.set(false);}});
+    }catch(Exception e){analyzing.set(false);error("Frame: "+e.getMessage());}finally{if(image!=null)image.close();}}
+    final class Overlay extends View {final Paint paint=new Paint(3);Overlay(Context c){super(c);}protected void onDraw(Canvas canvas){RectF box=square();paint.setColor(0x88000000);canvas.drawRect(0,0,getWidth(),box.top,paint);canvas.drawRect(0,box.bottom,getWidth(),getHeight(),paint);canvas.drawRect(0,box.top,box.left,box.bottom,paint);canvas.drawRect(box.right,box.top,getWidth(),box.bottom,paint);paint.setColor(SystemClock.elapsedRealtime()<successUntil?Color.GREEN:Color.CYAN);paint.setStyle(Paint.Style.STROKE);paint.setStrokeWidth(3*getResources().getDisplayMetrics().density);canvas.drawRect(box,paint);paint.setStyle(Paint.Style.FILL);}}
+}
