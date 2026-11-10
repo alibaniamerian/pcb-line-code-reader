@@ -92,3 +92,7 @@ For USB diagnosis, create the private `files/capture_scan` marker using `run-as`
 One full luminance frame, the exact decoder crop and geometry metadata are saved
 as `scan_frame.pgm`, `scan_roi.pgm` and `scan_info.txt` in app-private storage.
 No diagnostic images are saved during normal use.
+
+## OZAK Inventory Android pilot
+
+The separate [Inventory app](inventory-android/README.md) includes production-stage controls and embedded sign-in. See its [English test guide](inventory-android/docs/PILOT_TEST_EN.md) and the `inventory-v0.3.1-pilot` release for the APK. The standalone reader above remains unchanged.

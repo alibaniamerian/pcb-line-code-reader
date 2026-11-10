@@ -1,0 +1,16 @@
+.gradle/
+.tools/
+.android/
+**/build/
+local.properties
+*.jks
+*.keystore
+*.log
+.idea/
+*.iml
+.sandbox/
+**/.local/
+TEMP/
+.publish/
+TEMP/
+.publish/
