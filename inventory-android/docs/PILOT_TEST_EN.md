@@ -1,8 +1,10 @@
-# OZAK Inventory 0.7.0 — pilot test instructions
+# OZAK Inventory 0.8.0 — pilot test instructions
 
 Install the APK from the Inventory pilot release and open **OZAK Inventory**. Android 11 or newer is required. This is an internally tested pilot APK, not a public production rollout. It updates earlier pilots in place (same signing key); local login data is kept.
 
 **Summary**
+
+- New interface: home cards, order dashboard tiles (Reels, PCB stages, Supplement, Progress), app bar with Online/Offline status and a ⋮ menu (sign in, refresh, leave).
 
 - The camera opens **inside** the reel and PCB stage screens. There is no separate scanner screen and no extra confirmation.
 - **Reels are checked against the order's reference list.** Currently this is a **LOCAL VERIFICATION**: the result is stored on this phone only and nothing is sent to the server. **Use one phone per order** for the reel check.

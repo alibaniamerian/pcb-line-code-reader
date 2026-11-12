@@ -1,6 +1,6 @@
 # OZAK Inventory Android pilot
 
-Version 0.7.0-reel-check-ready-pilot, Android 11+. The original standalone camera project remains at the repository root. This directory contains the Inventory app and its pinned scanner integration.
+Version 0.8.0-ui-pilot, Android 11+. The original standalone camera project remains at the repository root. This directory contains the Inventory app and its pinned scanner integration.
 
 See [English pilot instructions](docs/PILOT_TEST_EN.md). Download the Inventory APK from the release tagged `inventory-v0.3.1-pilot`; do not confuse it with the standalone PCB reader or synthetic sandbox apps.
 
