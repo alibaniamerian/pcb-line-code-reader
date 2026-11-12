@@ -20,7 +20,7 @@ change('BridgePolicy.java', 'https://inventory.askpart.com', f'http://127.0.0.1:
 change('BridgePolicy.java', '"https".equals(u.getScheme())&&"inventory.askpart.com".equals(u.getHost())', '"http".equals(u.getScheme())&&"127.0.0.1".equals(u.getHost())')
 change('BridgePolicy.java', '(u.getPort()==-1||u.getPort()==443)', f'(u.getPort()=={PORT})')
 change('OperatorActivity.java', 'return !"https".equals(u.getScheme())||u.getUserInfo()!=null;', f'return !"http".equals(u.getScheme())||!"127.0.0.1".equals(u.getHost())||u.getPort()!={PORT}||u.getUserInfo()!=null;')
-change('OperatorBridge.java', 'if(!role)throw new JSONException("permission");', 'if(!role||!"mobile-test".equals(user.getString("username")))throw new JSONException("permission");')
+change('OperatorBridge.java', 'if(!role)throw new JSONException("permission");', 'if(!role||!("mobile-test".equals(user.getString("username"))||"mobile-test-2".equals(user.getString("username"))))throw new JSONException("permission");')
 change('OperatorActivity.java', 'private void select(JSONObject selected){', 'private void select(JSONObject selected){if(!"TEST-MOBILE-001".equals(selected.optString("order_number"))){say("Only the synthetic test order is allowed.");return;}')
 # Only the normal operator activity is launchable; no production login/demo entry.
 manifest = '''<manifest xmlns:android="http://schemas.android.com/apk/res/android">
