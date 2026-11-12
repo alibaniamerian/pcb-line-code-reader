@@ -35,7 +35,7 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
     private static final long SAME_CODE_HOLD_MS=2500;
     // App bar and live-result row
     private LinearLayout appBar,liveRow; private TextView appTitle,appSub,onlinePill,liveIcon,liveSub;
-    private String reelFilter="all";
+    private String reelFilter="all",reelSide=null;
     // Reel gate (app-side only): PCB stages unlock when every server reference reel is RECEIVED, or by a local override.
     private long packagesOrder; private final List<String[]> wrongReels=new ArrayList<>();
     /** step_id|pcb_code confirmed by the server on this phone for the selected order; avoids resending (each new request is an audit record). */
@@ -49,7 +49,7 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
     private static final long POLL_MS=10000;
     private final Runnable pollTick=()->{
         schedulePoll(POLL_MS);
-        if(!resumed||!serverCheckMode||order==null||!("order".equals(page)||"reels".equals(page))||connection.getVisibility()==View.VISIBLE)return;
+        if(!resumed||!serverCheckMode||order==null||!("order".equals(page)||"reels".equals(page)||"pcb".equals(page))||connection.getVisibility()==View.VISIBLE)return;
         if(SystemClock.elapsedRealtime()<pollBackoffUntil||!available()||scanBusy||pending())return;
         try{if(bridge.send(command("PACKAGES")))pollInFlight=true;}catch(Exception ignored){}
     };
@@ -166,7 +166,7 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
     private boolean canScan(String op){return StageRules.boardOperation(op)?canWrite(op):serverCheckMode?canWrite("REEL_CHECK"):order!=null&&route!=null;}
     private void startLive(String op,JSONObject step,JSONObject station){
         if(!canScan(op)){say(pending()?"Resolve the saved request before scanning.":"Scanning is unavailable: not connected or not permitted.");render();return;}
-        if(reelLockedFor(op)){say("PCB stages locked: "+reelLock());render();return;}
+        {String lock=stepLock(step);if(lock!=null){say("Stage locked: "+lock);render();return;}}
         try{
             scanOrder=order.getLong("order_id");scanActor=actor;scanOperation=op;scannedStep=new JSONObject(step.toString());
             scanContext=new JSONObject().put("route_version",route.getInt("route_version")).put("step_id",step.getString("step_id")).put("physical_station_id",station.getString("station_id")).put("selected_side",step.get("side"));
@@ -214,7 +214,7 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
         boolean held=raw.equals(lastCode)&&now-lastSeen<SAME_CODE_HOLD_MS;lastCode=raw;lastSeen=now;if(held)return;
         boolean board=StageRules.boardOperation(liveOp);
         if(raw.isEmpty()||raw.length()>4096||!(board?"DATA_MATRIX":"QR_CODE").equals(format)){liveState(InlineScanner.BAD,"Wrong code type — expected a "+(board?"PCB DataMatrix":"reel QR label")+". Nothing recorded.");if(!board){wrongReel(raw.length()>40?raw.substring(0,40)+"…":raw,"Wrong code type");render();}return;}
-        if(reelLockedFor(liveOp)){stopLive();say("PCB stages locked: "+reelLock());render();return;}
+        {String lock=stepLock(liveStep);if(lock!=null){stopLive();say("Stage locked: "+lock);render();return;}}
         if(order==null||order.optLong("order_id")!=scanOrder||actor!=scanActor){stopLive();say("Order or operator changed. Choose the stage again; nothing recorded.");render();return;}
         if(!board){verifyReel(raw);return;}
         if(!canWrite(liveOp)){liveState(InlineScanner.BAD,pending()?"A saved request is unresolved. Check its status first. Nothing recorded.":"Not connected or not permitted. Nothing recorded.");return;}
@@ -307,7 +307,7 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
     private boolean read(String op,JSONObject query){if(!available())return false;try{JSONObject c=command(op);if(query!=null)c.put("query",query);if(bridge.send(c)){say("Loading "+op.toLowerCase(Locale.US).replace('_',' ')+"…");render();return true;}}catch(Exception e){say("Could not prepare the request.");}return false;}
     private void loadOrders(boolean more){if(!more)orders=new JSONArray();try{read("ORDERS",new JSONObject().put("after",more?nextOrders:0).put("limit",50));}catch(Exception e){say("Invalid order pagination.");}}
     private void select(JSONObject selected){if(!available())return;stopLive();packagesOrder=0;wrongReels.clear();recordedHere.clear();order=selected;route=null;proposal=null;packages=new JSONArray();progress=new JSONArray();page="order";read("ROUTE",null);}
-    private void showPage(String p){page=p;proposal=null;showControls();if(!available())return;if("reels".equals(p))read("PACKAGES",null);if("supplement".equals(p))read("DELIVERED_ITEMS",null);if("progress".equals(p)){progress=new JSONArray();read("PROGRESS",null);}}
+    private void showPage(String p){page=p;proposal=null;showControls();if(!available())return;if("reels".equals(p)||("pcb".equals(p)&&serverCheckMode))read("PACKAGES",null);if("supplement".equals(p))read("DELIVERED_ITEMS",null);if("progress".equals(p)){progress=new JSONArray();read("PROGRESS",null);}}
     /** Plain body text (size: 24 = page title, 18-20 = section title, else body). */
     private TextView text(String s,int size){
         TextView t=size>=18?Ui.text(this,s,size>=22?20:16,Ui.TEXT,700):Ui.text(this,s,Math.min(size,15)-1,Ui.MUTED,500);
@@ -336,15 +336,40 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
     /** An override only covers the reels that were missing when it was given; a newly added reel locks again. */
     private boolean overrideCovers(List<String> missing){JSONObject o=reelOverride();if(o==null)return false;JSONArray a=o.optJSONArray("missing");Set<String> allowed=new HashSet<>();for(int i=0;a!=null&&i<a.length();i++)allowed.add(a.optString(i));return allowed.containsAll(missing)&&(packages.length()>0||o.optBoolean("empty_list"));}
     /** Null when PCB stages may be scanned; otherwise the reason they are locked. */
-    private String reelLock(){
+    private String reelLock(){return gateLock(null);}
+    private boolean reelLockedFor(String op){return StageRules.boardOperation(op)&&(liveStep!=null&&liveOp!=null&&op.equals(liveOp)?stepLock(liveStep):reelLock())!=null;}
+    // ---- Two-sided material gate (contract 1.3: step.material_gate, PACKAGES.placement_sides) ----
+    private static Set<String> sidesOf(JSONObject p){Set<String> s=new HashSet<>();JSONArray a=p==null?null:p.optJSONArray("placement_sides");for(int i=0;a!=null&&i<a.length();i++)s.add(a.optString(i));return s;}
+    /** A row that carries placement_sides but maps to no side; it blocks every side until resolved. */
+    private static boolean unmapped(JSONObject p){return p!=null&&p.has("placement_sides")&&sidesOf(p).isEmpty();}
+    /** True when the route uses explicit material gates (the app then never infers policy from step.side). */
+    private boolean sideGated(){if(route==null)return false;JSONArray a=route.optJSONArray("steps");for(int i=0;a!=null&&i<a.length();i++){JSONObject s=a.optJSONObject(i);if(s!=null&&s.has("material_gate"))return true;}return false;}
+    /** Sides with a SIDE gate, in route order (the first assembled side first). */
+    private List<String> gateSides(){List<String> out=new ArrayList<>();if(route==null)return out;List<JSONObject> st=new ArrayList<>();JSONArray a=route.optJSONArray("steps");
+        for(int i=0;a!=null&&i<a.length();i++){JSONObject s=a.optJSONObject(i);if(s!=null&&s.optBoolean("enabled")&&"SIDE".equals(s.optString("material_gate"))&&!s.isNull("side"))st.add(s);}
+        st.sort(Comparator.comparingInt(s->s.optInt("sequence")));for(JSONObject s:st)if(!out.contains(s.optString("side")))out.add(s.optString("side"));return out;}
+    /** Packages a side needs (null = all). Unmapped rows are needed by every side. */
+    private List<JSONObject> requiredFor(String side){List<JSONObject> out=new ArrayList<>();for(int i=0;i<packages.length();i++){JSONObject p=packages.optJSONObject(i);if(p==null)continue;if(side==null||unmapped(p)||sidesOf(p).contains(side))out.add(p);}return out;}
+    private List<String> missingOf(List<JSONObject> req){List<String> out=new ArrayList<>();JSONObject v=verified();for(JSONObject p:req)if(!isGreen(p,v))out.add(p.optString("package_code"));return out;}
+    /** Lock reason for one material gate (side null = whole order), or null when open. */
+    private String gateLock(String side){
         if(order==null)return "No order selected.";
         if(!reelsKnown())return "Reel reference list not loaded from the server yet.";
-        List<String> missing=missingReels();
+        List<JSONObject> req=requiredFor(side);List<String> missing=missingOf(req);
         if(packages.length()==0)return overrideCovers(missing)?null:"No active package allocations returned for this order — order data is incomplete. Report it, or override with a reason.";
         if(missing.isEmpty()||overrideCovers(missing))return null;
-        return missing.size()+" of "+packages.length()+" reels not yet verified.";
+        int um=0;for(JSONObject p:req)if(unmapped(p))um++;
+        return missing.size()+" of "+req.size()+(side==null?"":" "+side)+" reels not yet verified."+(um>0?" "+um+" package(s) have no side mapping — report it.":"");
     }
-    private boolean reelLockedFor(String op){return StageRules.boardOperation(op)&&reelLock()!=null;}
+    /** Lock reason for a route step. NONE = open, SIDE = that side's reels, ALL or unknown = all reels; no field = legacy whole-order rule. */
+    private String stepLock(JSONObject step){
+        if(step==null||!StageRules.boardOperation(step.optString("operation")))return null;
+        if(!step.has("material_gate"))return reelLock();
+        String g=step.optString("material_gate");
+        if("NONE".equals(g))return null;
+        if("SIDE".equals(g))return step.isNull("side")?"Route error: side gate without a side. Report it.":gateLock(step.optString("side"));
+        return gateLock(null);
+    }
     private void wrongReel(String label,String reason){
         String time=new java.text.SimpleDateFormat("HH:mm:ss",Locale.US).format(new Date());
         if(!wrongReels.isEmpty()&&wrongReels.get(0)[0].equals(label)&&wrongReels.get(0)[1].equals(reason)){wrongReels.get(0)[2]=time;}
@@ -359,10 +384,15 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
         if(!reelsKnown()){tt.addView(Ui.text(this,"Loading reference list…",15,Ui.TEXT,600));top.addView(tt,Ui.weight(1));c.addView(top);return;}
         List<String> missing=missingReels();int total=packages.length(),done=total-missing.size();
         tt.addView(Ui.text(this,done+" / "+total+(total==0?"  no reference list":"  verified"),20,Ui.TEXT,800));top.addView(tt,Ui.weight(1));
-        String lock=reelLock();
-        top.addView(lock==null?Ui.chip(this,"PCB unlocked",Ui.GREEN,Ui.GREEN_BG):Ui.chip(this,"🔒 PCB locked",0xFF475467,Ui.GREY_BG));
+        if(!sideGated()){String lock=reelLock();
+            top.addView(lock==null?Ui.chip(this,"PCB unlocked",Ui.GREEN,Ui.GREEN_BG):Ui.chip(this,"🔒 PCB locked",0xFF475467,Ui.GREY_BG));}
         c.addView(top);
         View bar=Ui.progress(this,total==0?0:(float)done/total,missing.isEmpty()&&total>0?Ui.GREEN:Ui.NAVY2);LinearLayout.LayoutParams bp=(LinearLayout.LayoutParams)bar.getLayoutParams();bp.topMargin=Ui.dp(this,12);c.addView(bar);
+        if(sideGated()){int n=1;for(String side:gateSides()){List<JSONObject> req=requiredFor(side);int miss=missingOf(req).size(),ok=req.size()-miss;String lock=gateLock(side);
+            LinearLayout sr=Ui.row(this);sr.addView(Ui.text(this,(n++)+". "+side,13.5f,Ui.TEXT,700),Ui.weight(1));
+            sr.addView(Ui.text(this,ok+" / "+req.size()+"   ",13,Ui.MUTED,600));
+            sr.addView(lock==null?Ui.chip(this,"Unlocked",Ui.GREEN,Ui.GREEN_BG):Ui.chip(this,"🔒 "+miss+" left",0xFF475467,Ui.GREY_BG));c.addView(sr,Ui.block(this,12));
+            View b2=Ui.progress(this,req.isEmpty()?1:(float)ok/req.size(),lock==null?Ui.GREEN:Ui.NAVY2);((LinearLayout.LayoutParams)b2.getLayoutParams()).topMargin=Ui.dp(this,6);c.addView(b2);}}
         if(serverCheckMode&&verified().length()>0)c.addView(Ui.text(this,verified().length()+" phone-only checks from local mode are not used; re-scan those reels.",12.5f,Ui.RED,600),Ui.block(this,10));
         if(withModeNotice)c.addView(serverCheckMode?Ui.notice(this,"Server reel check — shared with all operators, refreshed every 10 s.",Ui.NAVY2,Ui.BLUE_BG)
             :Ui.notice(this,"⚠  Local verification — stored on this phone only. Use one phone per order.",Ui.AMBER,Ui.AMBER_BG),Ui.block(this,12));
@@ -371,7 +401,10 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
     private void renderLockControls(){
         if(!reelsKnown())return;List<String> missing=missingReels();int total=packages.length();
         JSONObject o=reelOverride();String lock=reelLock();
-        if(lock!=null){colored("PCB stages locked: "+lock,13,Ui.RED,0);button("Override reel lock (this phone only)…",Ui.DANGER,true,()->confirmReelOverride(missing));}
+        if(sideGated()){for(String side:gateSides()){String sl=gateLock(side);if(sl==null)continue;List<String> sm=missingOf(requiredFor(side));
+                colored(side+" stages locked: "+sl,13,Ui.RED,0);button("Override "+side+" reel lock (this phone only)…",Ui.DANGER,true,()->confirmReelOverride(sm));}
+            if(o!=null)colored("Reel lock override on this phone by user "+o.optLong("actor")+" at "+o.optString("at")+" · Reason: "+o.optString("reason"),13,Ui.AMBER,Ui.AMBER_BG);}
+        else if(lock!=null){colored("PCB stages locked: "+lock,13,Ui.RED,0);button("Override reel lock (this phone only)…",Ui.DANGER,true,()->confirmReelOverride(missing));}
         else if(o!=null&&!(total>0&&missing.isEmpty()))colored("Reel lock overridden on this phone by user "+o.optLong("actor")+" at "+o.optString("at")+"\nReason: "+o.optString("reason"),13,Ui.AMBER,Ui.AMBER_BG);
         if(o!=null)button("Remove reel-lock override",Ui.TEXT_BTN,true,()->{gatePrefs().edit().remove("order_"+order.optLong("order_id")).apply();if(liveOp!=null&&reelLockedFor(liveOp))stopLive();render();});
     }
@@ -382,7 +415,9 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
             .setView(reason).setNegativeButton("Cancel",null).setPositiveButton("Override",null).create();
         dialog.setOnShowListener(ignored->dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{
             String r=reason.getText().toString().trim();if(r.isEmpty()||r.length()>500){reason.setError("Enter a reason of 1–500 characters.");return;}
-            try{JSONObject o=new JSONObject().put("actor",actor).put("reason",r).put("at",new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm",Locale.US).format(new Date())).put("missing",new JSONArray(missing)).put("empty_list",packages.length()==0);
+            try{Set<String> all=new LinkedHashSet<>(missing);JSONObject old=reelOverride();String reasons=r;
+                if(old!=null){JSONArray a=old.optJSONArray("missing");for(int i=0;a!=null&&i<a.length();i++)all.add(a.optString(i));reasons=old.optString("reason")+" | "+r;}
+                JSONObject o=new JSONObject().put("actor",actor).put("reason",reasons).put("at",new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm",Locale.US).format(new Date())).put("missing",new JSONArray(all)).put("empty_list",packages.length()==0||(old!=null&&old.optBoolean("empty_list")));
                 gatePrefs().edit().putString("order_"+order.optLong("order_id"),o.toString()).apply();dialog.dismiss();say("Reel lock overridden on this phone.");render();
             }catch(Exception e){reason.setError("Could not save the override.");}
         }));dialog.show();
@@ -407,14 +442,16 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
         if(order==null)return;
         if("order".equals(page)){renderDashboard();return;}
         if("pcb".equals(page)){
-            if(reelLock()!=null){
+            if(!sideGated()&&reelLock()!=null){
                 LinearLayout c=addCard(10);c.addView(Ui.text(this,"🔒  PCB stages are locked",16,Ui.TEXT,700));
                 c.addView(Ui.text(this,reelLock(),13,Ui.MUTED,500),Ui.block(this,6));
                 c.addView(Ui.button(this,"Go to reel check",Ui.PRIMARY,true,()->showPage("reels")),Ui.block(this,12));
                 renderLockControls();return;
             }
             if(!lastOutcome.isEmpty()&&liveOp==null)colored("Last server result: "+lastOutcome.replace("\n"," · "),13,Ui.MUTED,Ui.GREY_BG);
+            if(sideGated())renderReelSummary(false);
             renderScanChoices("PCB_ENTRY");
+            if(sideGated())renderLockControls();
             if(StageRules.canSkip(route,rejectedStage,stageError,order.optLong("order_id")))button("Review skipped stages and continue",Ui.DANGER,canWrite("STAGE_PASSAGE"),this::confirmSkip);
             return;
         }
@@ -450,8 +487,15 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
         String lock=reelLock();List<String> missing=reelsKnown()?missingReels():new ArrayList<>();int total=packages.length();
         boolean pcbAllowed=route!=null&&(bridge.allowed("PCB_ENTRY")||bridge.allowed("STAGE_PASSAGE"));
         LinearLayout r1=Ui.row(this),r2=Ui.row(this);
-        tile(r1,"🧵",Ui.GREEN_BG,"REELS",reelsKnown()?(total-missing.size())+" / "+total:"…",reelsKnown()&&total>0?(float)(total-missing.size())/total:-1,null,route!=null,()->showPage("reels"),true);
-        tile(r1,lock==null?"▦":"🔒",lock==null?Ui.BLUE_BG:Ui.GREY_BG,"PCB STAGES",lock==null?(steps("PCB_ENTRY").size()+steps("STAGE_PASSAGE").size())+" stages":"Locked",-1,lock==null?"Ready to scan":(reelsKnown()?missing.size()+" reels left":"Waiting for reels"),pcbAllowed,()->showPage("pcb"),false);
+        String reelSub=null,pcbValue,pcbSub;boolean anyOpen;int stageCount=steps("PCB_ENTRY").size()+steps("STAGE_PASSAGE").size();
+        if(sideGated()&&reelsKnown()){StringBuilder sb=new StringBuilder();String firstLocked=null;int firstMissing=0;anyOpen=false;
+            for(String side:gateSides()){List<JSONObject> req=requiredFor(side);int miss=missingOf(req).size();if(sb.length()>0)sb.append(" · ");sb.append(side.charAt(0)).append(side.substring(1).toLowerCase(Locale.US)).append(" ").append(req.size()-miss).append("/").append(req.size());
+                if(gateLock(side)==null)anyOpen=true;else if(firstLocked==null){firstLocked=side;firstMissing=miss;}}
+            reelSub=sb.toString();pcbValue=firstLocked==null?stageCount+" stages":anyOpen?"Partly open":"Locked";
+            pcbSub=firstLocked==null?"All sides ready":firstLocked+" · "+firstMissing+" reels left";}
+        else{anyOpen=lock==null;pcbValue=lock==null?stageCount+" stages":"Locked";pcbSub=lock==null?"Ready to scan":(reelsKnown()?missing.size()+" reels left":"Waiting for reels");}
+        tile(r1,"🧵",Ui.GREEN_BG,"REELS",reelsKnown()?(total-missing.size())+" / "+total:"…",reelsKnown()&&total>0?(float)(total-missing.size())/total:-1,reelSub,route!=null,()->showPage("reels"),true);
+        tile(r1,anyOpen?"▦":"🔒",anyOpen?Ui.BLUE_BG:Ui.GREY_BG,"PCB STAGES",pcbValue,-1,pcbSub,pcbAllowed,()->showPage("pcb"),false);
         tile(r2,"＋",Ui.ORANGE_BG,"SUPPLEMENT","Request",-1,"Extra reel for this order",route!=null&&bridge.allowed("SUPPLEMENT_RESERVE"),()->showPage("supplement"),true);
         tile(r2,"↗",Ui.BLUE_BG,"PROGRESS","Boards",-1,"Quantity "+order.optInt("quantity"),route!=null,()->showPage("progress"),false);
         body.addView(r1,Ui.block(this,12));body.addView(r2,Ui.block(this,12));
@@ -501,14 +545,18 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
             String side=step.isNull("side")?"n/a":step.optString("side");
             tt.addView(Ui.oneLine(Ui.text(this,"Side "+side+" · "+("PCB_ENTRY".equals(stageOperation)?"entry":"passage")+(step.optBoolean("requires_result")?" · PASS/FAIL":""),12,Ui.MUTED,500)));
             top.addView(tt,Ui.weight(1));
+            String lock=stepLock(step);
             if(stepLive)top.addView(Ui.chip(this,"● Scanning",Ui.GREEN,Ui.GREEN_BG));
+            else if(lock!=null)top.addView(Ui.chip(this,"🔒 Locked",0xFF475467,Ui.GREY_BG));
+            else if("SIDE".equals(step.optString("material_gate")))top.addView(Ui.chip(this,"Reels ✓",Ui.GREEN,Ui.GREEN_BG));
             c.addView(top);
+            if(lock!=null)c.addView(Ui.text(this,lock,12.5f,Ui.RED,600),Ui.block(this,8));
             JSONArray stations=route.optJSONArray("stations");if(stations==null)continue;
             LinearLayout chips=Ui.row(this);HorizontalScrollView hs=new HorizontalScrollView(this);hs.setHorizontalScrollBarEnabled(false);hs.addView(chips);
             int count=0;
             for(int j=0;j<stations.length();j++){JSONObject station=stations.optJSONObject(j);if(station==null||!station.optBoolean("enabled")||!contains(station.optJSONArray("step_ids"),step.optString("step_id")))continue;
                 boolean active=stepLive&&liveStation!=null&&station.optString("station_id").equals(liveStation.optString("station_id"));
-                Button b=Ui.button(this,(active?"●  ":"⌗  ")+station.optString("name"),active?Ui.PRIMARY:Ui.OUTLINE,canScan(stageOperation),()->startLive(stageOperation,step,station));
+                Button b=Ui.button(this,(active?"●  ":"⌗  ")+station.optString("name"),active?Ui.PRIMARY:Ui.OUTLINE,canScan(stageOperation)&&lock==null,()->startLive(stageOperation,step,station));
                 LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-2,-2);p.rightMargin=Ui.dp(this,8);chips.addView(b,p);count++;}
             if(count>0)c.addView(hs,Ui.block(this,12));else c.addView(Ui.text(this,"No enabled station for this stage.",12.5f,Ui.MUTED,500),Ui.block(this,8));
         }
@@ -517,7 +565,14 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
     private void renderPackages(){
         renderReelSummary(liveOp==null);
         if(liveOp==null)button("⌗   Scan reels of this order",Ui.PRIMARY,canScan("PACKAGE_RECEIPT"),this::startReelScan);
-        JSONObject v=verified();int total=packages.length(),pending=reelsKnown()?missingReels().size():0,done=total-pending,wrong=wrongReels.size();
+        List<String> sides=sideGated()?gateSides():new ArrayList<>();if(reelSide!=null&&!sides.contains(reelSide))reelSide=null;
+        if(!sides.isEmpty()){LinearLayout sideRow=Ui.row(this);List<String> opts=new ArrayList<>();opts.add(null);opts.addAll(sides);
+            for(String o:opts){boolean on=o==null?reelSide==null:o.equals(reelSide);String label=o==null?"All sides":o+" ("+requiredFor(o).size()+")";
+                TextView chip=Ui.chip(this,label,on?0xFFFFFFFF:Ui.NAVY,on?Ui.NAVY:Ui.BLUE_BG);chip.setTextSize(12.5f);chip.setPadding(Ui.dp(this,12),Ui.dp(this,7),Ui.dp(this,12),Ui.dp(this,7));
+                chip.setOnClickListener(x->{reelSide=o;render();});LinearLayout.LayoutParams cp=new LinearLayout.LayoutParams(-2,-2);cp.rightMargin=Ui.dp(this,8);sideRow.addView(chip,cp);}
+            body.addView(sideRow,Ui.block(this,14));}
+        List<JSONObject> shown=requiredFor(reelSide);
+        JSONObject v=verified();int total=shown.size(),pending=reelsKnown()?missingOf(shown).size():0,done=total-pending,wrong=wrongReels.size();
         LinearLayout seg=Ui.row(this);seg.setBackground(Ui.shape(this,0xFFE9EDF4,12,0));int p3=Ui.dp(this,3);seg.setPadding(p3,p3,p3,p3);
         String[][] tabs={{"all","All "+total},{"pending","Pending "+pending},{"done","Done "+done},{"wrong","Wrong "+wrong}};
         for(String[] tab:tabs){boolean on=tab[0].equals(reelFilter);TextView t=Ui.text(this,tab[1],12.5f,on?Ui.NAVY:("wrong".equals(tab[0])&&wrong>0?Ui.RED:0xFF475467),on?700:600);
@@ -527,11 +582,12 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
         LinearLayout list=Ui.card(this);list.setPadding(0,Ui.dp(this,2),0,Ui.dp(this,2));body.addView(list,Ui.block(this,10));
         int rows=0;
         if("all".equals(reelFilter)||"wrong".equals(reelFilter))for(String[] w:wrongReels){reelRow(list,'r',w[0],w[1]+" · "+w[2],null,null);rows++;}
-        if(!"wrong".equals(reelFilter))for(int i=0;i<packages.length();i++){JSONObject p=packages.optJSONObject(i);if(p==null)continue;boolean green=isGreen(p,v);
+        if(!"wrong".equals(reelFilter))for(JSONObject p:shown){boolean green=isGreen(p,v);
             if("pending".equals(reelFilter)&&green||"done".equals(reelFilter)&&!green)continue;
             JSONObject mark=v.optJSONObject(p.optString("package_code"));
             String state=serverCheckMode?(green?"checked by user "+nullable(p,"checked_by_user_id"):null):(mark!=null?"verified "+mark.optString("at").replaceFirst("^\\d{4}-\\d{2}-\\d{2} ",""):"RECEIVED".equals(p.optString("receipt_status"))?"received (server)":null);
-            String sub=p.optString("part_number")+" · "+p.optString("description")+(state==null?"":"\n"+state)+(p.optBoolean("supplemental")?" · supplemental":"")+(p.optBoolean("transfer_required")?"\n⚠ warehouse transfer required":"");
+            Set<String> ps=sidesOf(p);String sideTag=!p.has("placement_sides")?"":ps.isEmpty()?"⚠ NO SIDE · ":ps.size()>1?"TOP+BOTTOM · ":ps.iterator().next()+" · ";
+            String sub=sideTag+p.optString("part_number")+" · "+p.optString("description")+(state==null?"":"\n"+state)+(p.optBoolean("supplemental")?" · supplemental":"")+(p.optBoolean("transfer_required")?"\n⚠ warehouse transfer required":"");
             reelRow(list,green?'g':'p',p.optString("package_code"),sub,p.optInt("current_quantity")+" "+p.optString("unit"),p.optString("location"));rows++;
             if(p.optBoolean("supplemental")&&!"DELIVERED".equals(p.optString("handover_status"))){Button b=Ui.button(this,"Confirm supplemental handover",Ui.TONAL,canWrite("SUPPLEMENT_DELIVER")&&!p.optBoolean("transfer_required"),()->confirmDelivery(p));
                 LinearLayout.LayoutParams bp=Ui.block(this,0);bp.setMargins(Ui.dp(this,14),0,Ui.dp(this,14),Ui.dp(this,10));list.addView(b,bp);}
