@@ -19,6 +19,7 @@ public final class MainActivity extends Activity {
     private TextView status;
     private boolean loginVisible;
     private boolean failed;
+    private int topInset, bottomInset; private LinearLayout hero;
     private ProductionBridge bridge;
     private TextView bridgeStatus;
     private Button sessionCheck, ordersCheck;
@@ -30,11 +31,12 @@ public final class MainActivity extends Activity {
         root = new LinearLayout(this);
         root.setLayoutDirection(View.LAYOUT_DIRECTION_LTR);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(24, 16, 24, 16);
+        Ui.systemBars(this); root.setBackgroundColor(Ui.BG);
         root.setOnApplyWindowInsetsListener((v, insets) -> {
-            android.graphics.Insets bars = android.os.Build.VERSION.SDK_INT >= 30
-                ? insets.getInsets(android.view.WindowInsets.Type.systemBars()) : null;
-            if (bars != null) v.setPadding(24 + bars.left, 16 + bars.top, 24 + bars.right, 16 + bars.bottom);
+            android.graphics.Insets bars = insets.getInsets(android.view.WindowInsets.Type.systemBars());
+            topInset = bars.top; bottomInset = bars.bottom;
+            if (loginVisible) v.setPadding(Ui.dp(this, 16) + bars.left, Ui.dp(this, 12) + bars.top, Ui.dp(this, 16) + bars.right, Ui.dp(this, 12) + bars.bottom);
+            else { v.setPadding(bars.left, 0, bars.right, 0); if (hero != null) hero.setPadding(Ui.dp(this, 22), bars.top + Ui.dp(this, 26), Ui.dp(this, 22), Ui.dp(this, 64)); }
             return insets;
         });
         setContentView(root);
@@ -55,25 +57,48 @@ public final class MainActivity extends Activity {
     }
     private void showHome() {
         if (bridge != null) bridge.visible(false);
-        detachWeb(); root.removeAllViews(); loginVisible = false;
-        LinearLayout container = root;
-        ScrollView scroll = new ScrollView(this);
-        container.addView(scroll, new LinearLayout.LayoutParams(-1, -1));
-        root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        scroll.addView(root);
-        label("OZAK Inventory", 26);
-        label("Production Control", 20);
-        label("Open production controls to sign in and select an authorized order.", 16);
-        button("Production controls", () -> startActivity(new android.content.Intent(this, OperatorActivity.class)), true);
-        android.content.Intent scanner = new android.content.Intent().setClassName(this,"org.datamatrix.linereader.InventoryScannerActivity");
-        button("Open PCB / QR Scanner", () -> startActivityForResult(scanner,81), scanner.resolveActivity(getPackageManager()) != null);
-        label("Select the order, stage and station from the server's available options.", 16);
-        label("Check every reel of the order first (local verification on this phone; one phone per order). PCB stages unlock when all reference reels are green; boards are then recorded automatically. Scanning does not record material consumption or finished production.", 16);
-        button("Clear Local Login Data", () -> new AlertDialog.Builder(this)
-            .setMessage("Clear this app's cookies and login data? This does not sign you out on the server.")
-            .setNegativeButton("Cancel", null).setPositiveButton("Clear", (d,w) -> clearSession()).show(), true);
-        root = container;
+        detachWeb(); root.removeAllViews(); loginVisible = false; root.setPadding(0, 0, 0, 0);
+        ScrollView scroll = new ScrollView(this); scroll.setFillViewport(true);
+        root.addView(scroll, new LinearLayout.LayoutParams(-1, -1));
+        LinearLayout page = new LinearLayout(this); page.setOrientation(LinearLayout.VERTICAL); scroll.addView(page);
+        hero = new LinearLayout(this); hero.setOrientation(LinearLayout.VERTICAL); hero.setBackgroundColor(Ui.NAVY);
+        hero.setPadding(Ui.dp(this, 22), topInset + Ui.dp(this, 26), Ui.dp(this, 22), Ui.dp(this, 64));
+        ImageView logo = new ImageView(this); logo.setImageResource(R.mipmap.ic_launcher_foreground); logo.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        logo.setBackground(Ui.shape(this, android.graphics.Color.WHITE, 16, 0)); logo.setClipToOutline(true);
+        hero.addView(logo, new LinearLayout.LayoutParams(Ui.dp(this, 56), Ui.dp(this, 56)));
+        hero.addView(Ui.text(this, "OZAK Inventory", 23, android.graphics.Color.WHITE, 800), Ui.block(this, 14));
+        String version = "";
+        try { version = getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception ignored) {}
+        hero.addView(Ui.text(this, "Production control · " + version, 13, 0xBFFFFFFF, 500), Ui.block(this, 2));
+        page.addView(hero);
+        LinearLayout content = new LinearLayout(this); content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(Ui.dp(this, 14), 0, Ui.dp(this, 14), Ui.dp(this, 20) + bottomInset);
+        LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(-1, -2); cp.topMargin = -Ui.dp(this, 44); page.addView(content, cp);
+        homeCard(content, "🏭", Ui.BLUE_BG, "Production controls", "Sign in, choose an order, check reels and record PCB stages", true,
+            () -> startActivity(new android.content.Intent(this, OperatorActivity.class)));
+        android.content.Intent scanner = new android.content.Intent().setClassName(this, "org.datamatrix.linereader.InventoryScannerActivity");
+        homeCard(content, "⌗", Ui.ORANGE_BG, "Code scanner", "Read a PCB DataMatrix or QR on this phone. Nothing is sent", scanner.resolveActivity(getPackageManager()) != null,
+            () -> startActivityForResult(scanner, 81));
+        homeCard(content, "⚙", Ui.GREY_BG, "Settings", "Sign-in data on this phone", true, this::showSettings);
+        TextView foot = Ui.text(this, "Check every reel of the order first. PCB stages unlock when all reference reels are green; boards are then recorded automatically. Scanning never consumes material or finishes production.", 12, Ui.MUTED, 500);
+        foot.setGravity(android.view.Gravity.CENTER); content.addView(foot, Ui.block(this, 20));
+    }
+    private void homeCard(LinearLayout parent, String glyph, int bg, String title, String sub, boolean enabled, Runnable open) {
+        LinearLayout c = Ui.card(this); c.setOrientation(LinearLayout.HORIZONTAL); c.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        c.setBackground(Ui.pressable(Ui.shape(this, Ui.SURFACE, 20, 0))); c.setClickable(enabled); c.setAlpha(enabled ? 1f : 0.5f);
+        c.setOnClickListener(v -> open.run()); c.setPadding(Ui.dp(this, 16), Ui.dp(this, 16), Ui.dp(this, 12), Ui.dp(this, 16));
+        c.addView(Ui.icon(this, glyph, bg, 48));
+        LinearLayout t = new LinearLayout(this); t.setOrientation(LinearLayout.VERTICAL); t.setPadding(Ui.dp(this, 14), 0, Ui.dp(this, 8), 0);
+        t.addView(Ui.text(this, title, 15.5f, Ui.TEXT, 700)); t.addView(Ui.text(this, sub, 12.5f, Ui.MUTED, 500), Ui.block(this, 2));
+        c.addView(t, Ui.weight(1)); c.addView(Ui.text(this, "›", 24, Ui.FAINT, 500));
+        parent.addView(c, Ui.block(this, 12));
+    }
+    private void showSettings() {
+        new AlertDialog.Builder(this).setTitle("Settings")
+            .setItems(new String[]{"Clear local login data"}, (d, which) -> new AlertDialog.Builder(this)
+                .setMessage("Clear this app's cookies and login data? This does not sign you out on the server.")
+                .setNegativeButton("Cancel", null).setPositiveButton("Clear", (x, y) -> clearSession()).show())
+            .setNegativeButton("Close", null).show();
     }
     @Override protected void onActivityResult(int request,int result,android.content.Intent data) {
         super.onActivityResult(request,result,data);
@@ -101,7 +126,7 @@ public final class MainActivity extends Activity {
     }
     private void showLogin() {
         detachWeb();
-        root.removeAllViews(); loginVisible = true;
+        root.removeAllViews(); loginVisible = true; root.setPadding(Ui.dp(this, 16), Ui.dp(this, 12) + topInset, Ui.dp(this, 16), Ui.dp(this, 12) + bottomInset);
         button("Back to Stations", this::showHome, true);
         status = label("Sign in to continue. Production actions are not enabled yet.", 14);
         bridgeStatus = label("Open the connection page and approve this app. Live writes are disabled.", 14);

@@ -33,6 +33,9 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
     private InlineScanner scanner; private LinearLayout livePanel,liveResult; private TextView liveTitle,liveStatus; private EditText liveNotes,liveThickness;
     private String liveOp,lastCode=""; private JSONObject liveStep,liveStation; private long lastSeen; private boolean scanBusy;
     private static final long SAME_CODE_HOLD_MS=2500;
+    // App bar and live-result row
+    private LinearLayout appBar,liveRow; private TextView appTitle,appSub,onlinePill,liveIcon,liveSub;
+    private String reelFilter="all";
     // Reel gate (app-side only): PCB stages unlock when every server reference reel is RECEIVED, or by a local override.
     private long packagesOrder; private final List<String[]> wrongReels=new ArrayList<>();
     /** step_id|pcb_code confirmed by the server on this phone for the selected order; avoids resending (each new request is an audit record). */
@@ -65,14 +68,16 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
     @Override public void onCreate(Bundle state){
         super.onCreate(state);getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);WebView.setWebContentsDebuggingEnabled(false);
         try{journal=new OperatorJournal(getFilesDir());}catch(Exception e){storageFailed=true;}
-        root=new LinearLayout(this);root.setOrientation(1);root.setLayoutDirection(View.LAYOUT_DIRECTION_LTR);
-        root.setPadding(20,16,20,16);root.setOnApplyWindowInsetsListener((v,i)->{v.setPadding(20+i.getSystemWindowInsetLeft(),16+i.getSystemWindowInsetTop(),20+i.getSystemWindowInsetRight(),16+i.getSystemWindowInsetBottom());return i;});
-        banner=new TextView(this);banner.setTextSize(16);root.addView(banner);
-        LinearLayout nav=new LinearLayout(this);Button exit=new Button(this);exit.setText("Leave controls");exit.setOnClickListener(v->finish());nav.addView(exit,new LinearLayout.LayoutParams(0,-2,1));
-        Button login=new Button(this);login.setText("Connection / sign in");login.setOnClickListener(v->showConnection(true));nav.addView(login,new LinearLayout.LayoutParams(0,-2,1));root.addView(nav);
+        Ui.systemBars(this);
+        root=new LinearLayout(this);root.setOrientation(1);root.setLayoutDirection(View.LAYOUT_DIRECTION_LTR);root.setBackgroundColor(Ui.BG);
+        buildAppBar();root.addView(appBar);
+        root.setOnApplyWindowInsetsListener((v,i)->{android.graphics.Insets b=i.getInsets(WindowInsets.Type.systemBars()|WindowInsets.Type.ime());
+            v.setPadding(b.left,0,b.right,b.bottom);appBar.setPadding(Ui.dp(this,8),b.top+Ui.dp(this,6),Ui.dp(this,8),Ui.dp(this,12));return WindowInsets.CONSUMED;});
+        banner=Ui.text(this,"",12.5f,Ui.MUTED,500);banner.setMaxLines(3);banner.setPadding(Ui.dp(this,18),Ui.dp(this,8),Ui.dp(this,18),Ui.dp(this,2));root.addView(banner);
         connection=new LinearLayout(this);connection.setOrientation(1);web=new WebView(this);connection.addView(web,new LinearLayout.LayoutParams(-1,0,1));root.addView(connection,new LinearLayout.LayoutParams(-1,0,1));
         buildLivePanel();root.addView(livePanel);
-        scroll=new ScrollView(this);body=new LinearLayout(this);body.setOrientation(1);scroll.addView(body);root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));setContentView(root);
+        scroll=new ScrollView(this);scroll.setClipToPadding(false);body=new LinearLayout(this);body.setOrientation(1);
+        int pad=Ui.dp(this,14);body.setPadding(pad,Ui.dp(this,6),pad,Ui.dp(this,24));scroll.addView(body);root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));setContentView(root);
         WebSettings settings=web.getSettings();settings.setJavaScriptEnabled(true);settings.setDomStorageEnabled(true);settings.setAllowFileAccess(false);settings.setAllowContentAccess(false);settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);settings.setSupportMultipleWindows(false);settings.setJavaScriptCanOpenWindowsAutomatically(false);
         CookieManager.getInstance().setAcceptCookie(true);CookieManager.getInstance().setAcceptThirdPartyCookies(web,true);
         bridge=new OperatorBridge(web,this);
@@ -87,27 +92,73 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
         });
         showConnection(true);web.loadUrl(BridgePolicy.PAGE);
     }
+    private void buildAppBar(){
+        appBar=Ui.row(this);appBar.setBackgroundColor(Ui.NAVY);appBar.setElevation(Ui.dp(this,3));
+        TextView back=barIcon("←");back.setOnClickListener(v->onBackPressed());appBar.addView(back);
+        LinearLayout titles=new LinearLayout(this);titles.setOrientation(1);titles.setPadding(Ui.dp(this,10),0,Ui.dp(this,8),0);
+        appTitle=Ui.oneLine(Ui.text(this,"Production control",17.5f,Color.WHITE,700));appSub=Ui.oneLine(Ui.text(this,"",12.5f,0xCCFFFFFF,500));
+        titles.addView(appTitle);titles.addView(appSub);appBar.addView(titles,Ui.weight(1));
+        onlinePill=Ui.text(this,"Offline",11.5f,Color.WHITE,600);onlinePill.setPadding(Ui.dp(this,10),Ui.dp(this,5),Ui.dp(this,10),Ui.dp(this,5));
+        onlinePill.setOnClickListener(v->{if(bridge==null||!bridge.connected())showConnection(true);});appBar.addView(onlinePill);
+        TextView menu=barIcon("⋮");menu.setOnClickListener(this::showMenu);appBar.addView(menu);
+    }
+    private TextView barIcon(String glyph){TextView t=Ui.text(this,glyph,19,Color.WHITE,600);t.setGravity(Gravity.CENTER);t.setBackground(Ui.pressable(Ui.shape(this,0x1FFFFFFF,12,0)));
+        LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(Ui.dp(this,40),Ui.dp(this,40));p.setMargins(Ui.dp(this,4),0,Ui.dp(this,4),0);t.setLayoutParams(p);return t;}
+    private void showMenu(View anchor){
+        PopupMenu m=new PopupMenu(this,anchor);m.getMenu().add(0,1,0,"Sign in / connection");m.getMenu().add(0,2,1,"Refresh");m.getMenu().add(0,3,2,"Leave production controls");
+        m.setOnMenuItemClickListener(i->{if(i.getItemId()==1)showConnection(true);else if(i.getItemId()==2)refreshPage();else finish();return true;});m.show();
+    }
+    private void refreshPage(){
+        if("orders".equals(page))loadOrders(false);else if("order".equals(page)){if(!read("ROUTE",null))read("PACKAGES",null);}
+        else if("reels".equals(page))read("PACKAGES",null);else if("progress".equals(page)){progress=new JSONArray();read("PROGRESS",null);}else if("pcb".equals(page))read("ROUTE",null);
+    }
+    /** Title, subtitle and connection pill for the current page. */
+    private void updateAppBar(){
+        if(appBar==null)return;boolean signIn=connection.getVisibility()==View.VISIBLE;String on=order==null?"":order.optString("order_number");
+        String t,s;
+        if(signIn){t="Sign in";s="Approve the app connection";}
+        else switch(page){
+            case "order":t=on;s=display(order==null?new JSONObject():order,"product_part_number");break;
+            case "reels":t="Reel check";s=on+" · "+(serverCheckMode?"server check":"local verification");break;
+            case "pcb":t="PCB stages";s=on+(route==null?"":" · route v"+route.optInt("route_version"));break;
+            case "supplement":t="Supplemental reel";s=on;break;
+            case "progress":t="Progress";s=on;break;
+            default:t="Production orders";s=session==null?"Not signed in":"Signed in · user "+actor;
+        }
+        appTitle.setText(t);appSub.setText(s);
+        boolean online=bridge!=null&&bridge.connected();onlinePill.setText(online?"●  Online":"●  Offline");
+        onlinePill.setTextColor(online?0xFFBBF7D0:0xFFFECACA);onlinePill.setBackground(Ui.shape(this,online?0x2E16A34A:0x33DC2626,99,0));
+    }
     private void buildLivePanel(){
         livePanel=new LinearLayout(this);livePanel.setOrientation(1);livePanel.setVisibility(View.GONE);
-        liveTitle=new TextView(this);liveTitle.setTextSize(15);liveTitle.setPadding(0,8,0,8);livePanel.addView(liveTitle);
+        int pad=Ui.dp(this,14);livePanel.setPadding(pad,Ui.dp(this,8),pad,0);
+        liveTitle=Ui.text(this,"",12,Ui.MUTED,500);liveTitle.setVisibility(View.GONE);livePanel.addView(liveTitle);
         scanner=new InlineScanner(this);scanner.setListener(new InlineScanner.Listener(){
             @Override public void onCode(String payload,String format){liveCode(payload,format);}
             @Override public void onCameraProblem(String message){if(liveOp!=null)liveState(InlineScanner.BAD,message);}
-        });livePanel.addView(scanner);
-        liveStatus=new TextView(this);liveStatus.setTextSize(18);liveStatus.setTextColor(Color.WHITE);liveStatus.setPadding(16,12,16,12);liveStatus.setMinLines(2);livePanel.addView(liveStatus,new LinearLayout.LayoutParams(-1,-2));
-        liveThickness=new EditText(this);liveThickness.setHint("Paste thickness µm for the next board (optional)");liveThickness.setInputType(android.text.InputType.TYPE_CLASS_NUMBER|android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL);livePanel.addView(liveThickness);
+        });scanner.setOnClose(()->{stopLive();render();});livePanel.addView(scanner);
+        liveRow=Ui.row(this);liveRow.setPadding(Ui.dp(this,12),Ui.dp(this,10),Ui.dp(this,14),Ui.dp(this,10));
+        liveIcon=Ui.text(this,"•",15,Color.WHITE,800);liveIcon.setGravity(Gravity.CENTER);liveRow.addView(liveIcon,new LinearLayout.LayoutParams(Ui.dp(this,34),Ui.dp(this,34)));
+        LinearLayout lt=new LinearLayout(this);lt.setOrientation(1);lt.setPadding(Ui.dp(this,12),0,0,0);
+        liveStatus=Ui.text(this,"",14.5f,Ui.TEXT,700);liveSub=Ui.text(this,"",12.5f,Ui.MUTED,500);lt.addView(liveStatus);lt.addView(liveSub);liveRow.addView(lt,Ui.weight(1));
+        livePanel.addView(liveRow,Ui.block(this,10));
+        liveThickness=Ui.input(this,"Paste thickness µm for the next board (optional)");liveThickness.setInputType(android.text.InputType.TYPE_CLASS_NUMBER|android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL);livePanel.addView(liveThickness,Ui.block(this,8));
         liveResult=new LinearLayout(this);liveResult.setOrientation(1);liveResult.setVisibility(View.GONE);
-        liveNotes=new EditText(this);liveNotes.setHint("Notes (required for FAIL)");liveNotes.setMaxLines(4);liveResult.addView(liveNotes);
-        LinearLayout outcomes=new LinearLayout(this);
-        Button pass=new Button(this);pass.setText("PASS");pass.setTextColor(0xff1b5e20);pass.setOnClickListener(v->liveSubmitBoard("PASS"));outcomes.addView(pass,new LinearLayout.LayoutParams(0,-2,1));
-        Button fail=new Button(this);fail.setText("FAIL");fail.setTextColor(0xffb71c1c);fail.setOnClickListener(v->liveSubmitBoard("FAIL"));outcomes.addView(fail,new LinearLayout.LayoutParams(0,-2,1));
-        Button discard=new Button(this);discard.setText("Discard read");discard.setOnClickListener(v->{scanBusy=false;boardDraft=null;boardContext=null;hideResult();liveState(InlineScanner.IDLE,"Read discarded. Nothing recorded. Place the next code inside the square.");});outcomes.addView(discard,new LinearLayout.LayoutParams(0,-2,1));
-        liveResult.addView(outcomes);livePanel.addView(liveResult);
-        Button stop=new Button(this);stop.setText("Stop camera");stop.setOnClickListener(v->{stopLive();render();});livePanel.addView(stop);
+        liveNotes=Ui.input(this,"Notes (required for FAIL)");liveNotes.setMaxLines(4);liveResult.addView(liveNotes,Ui.block(this,8));
+        LinearLayout outcomes=Ui.row(this);
+        Button pass=Ui.button(this,"✓  PASS",Ui.SUCCESS,true,()->liveSubmitBoard("PASS"));Button fail=Ui.button(this,"✗  FAIL",Ui.DANGER,true,()->liveSubmitBoard("FAIL"));
+        LinearLayout.LayoutParams lp=Ui.weight(1);lp.rightMargin=Ui.dp(this,6);outcomes.addView(pass,lp);LinearLayout.LayoutParams rp=Ui.weight(1);rp.leftMargin=Ui.dp(this,6);outcomes.addView(fail,rp);
+        liveResult.addView(outcomes,Ui.block(this,8));
+        liveResult.addView(Ui.button(this,"Discard read",Ui.TEXT_BTN,true,()->{scanBusy=false;boardDraft=null;boardContext=null;hideResult();liveState(InlineScanner.IDLE,"Read discarded — nothing recorded\nPlace the next code inside the square.");}),Ui.block(this,2));
+        livePanel.addView(liveResult);
     }
+    /** Result row under the camera: first line is the title, the rest the detail. */
     private void liveState(int state,String message){
-        scanner.setState(state);liveStatus.setText(message);
-        liveStatus.setBackgroundColor(state==InlineScanner.OK?0xff1b5e20:state==InlineScanner.BAD?0xffb71c1c:state==InlineScanner.WAIT?0xff8d6e00:0xff37474f);
+        scanner.setState(state);String[] parts=message.split("\n",2);liveStatus.setText(parts[0]);liveSub.setText(parts.length>1?parts[1]:"");liveSub.setVisibility(parts.length>1?View.VISIBLE:View.GONE);
+        int fg=state==InlineScanner.OK?Ui.GREEN:state==InlineScanner.BAD?Ui.RED:state==InlineScanner.WAIT?0xFFD97706:Ui.FAINT;
+        int bg=state==InlineScanner.OK?Ui.GREEN_BG:state==InlineScanner.BAD?Ui.RED_BG:state==InlineScanner.WAIT?Ui.AMBER_BG:Ui.SURFACE;
+        liveIcon.setText(state==InlineScanner.OK?"✓":state==InlineScanner.BAD?"✗":state==InlineScanner.WAIT?"…":"▢");
+        liveIcon.setBackground(Ui.shape(this,fg,99,0));liveRow.setBackground(Ui.shape(this,bg,16,state==InlineScanner.IDLE?Ui.LINE:0));
     }
     private void hideResult(){liveResult.setVisibility(View.GONE);liveNotes.setText("");}
     /** Opens the embedded camera for one server-authorized stage and station. */
@@ -123,6 +174,8 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
         liveOp=op;liveStep=scannedStep;liveStation=station;boardDraft=null;boardContext=null;rejectedStage=null;stageError=null;scanBusy=false;lastCode="";
         boolean board=StageRules.boardOperation(op);
         liveTitle.setText((board?"Scanning: "+step.optInt("sequence")+". "+stageLabel(step)+" · Side: "+nullable(step,"side")+" · "+station.optString("name"):"Reel check · "+order.optString("order_number"))+"\n"+(board?"PCB DataMatrix — each valid board is recorded on the server automatically.":(serverCheckMode?"Reel QR label — each valid reel is checked on the server and shared with other operators.":"Reel QR label — LOCAL VERIFICATION on this phone only; nothing is sent to the server. Use one phone per order.")));
+        scanner.setBadge(board?"DataMatrix · "+step.optInt("sequence")+" "+stageLabel(step)+" · "+station.optString("name"):"QR · reel label · "+(serverCheckMode?"server":"local"));
+        scanner.setPreviewHeightDp(board?220:240);
         liveThickness.setText("");liveThickness.setVisibility("STAGE_PASSAGE".equals(op)&&step.optBoolean("allows_paste_measurement")?View.VISIBLE:View.GONE);
         hideResult();livePanel.setVisibility(View.VISIBLE);
         liveState(InlineScanner.IDLE,"Place the "+(board?"PCB code":"reel label")+" inside the square.");
@@ -238,12 +291,12 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
         else if(status>=500||status<200)liveState(InlineScanner.BAD,"Result unknown for "+code+". Check the saved request before scanning again.");
         else{liveState(InlineScanner.BAD,"Rejected: "+code+"\n"+error(data)+" — nothing recorded.");if(!StageRules.boardOperation(op))wrongReel(code,"Rejected by server: "+error(data));}
     }
-    private void showConnection(boolean reload){if(liveOp!=null)stopLive();connection.setVisibility(View.VISIBLE);scroll.setVisibility(View.GONE);if(reload&&bridge!=null&&!bridge.connected())web.loadUrl(BridgePolicy.PAGE);}
+    private void showConnection(boolean reload){if(liveOp!=null)stopLive();connection.setVisibility(View.VISIBLE);scroll.setVisibility(View.GONE);updateAppBar();if(reload&&bridge!=null&&!bridge.connected())web.loadUrl(BridgePolicy.PAGE);}
     private void showControls(){connection.setVisibility(View.GONE);scroll.setVisibility(View.VISIBLE);render();}
     private boolean pending(){return journal!=null&&journal.pending();}
     private boolean available(){return bridge!=null&&bridge.connected()&&!bridge.busy();}
     private boolean canWrite(String op){return available()&&!storageFailed&&!pending()&&OperatorRules.order(order)&&OperatorRules.route(route,order.optLong("order_id"))&&order.optBoolean("accepting_scans")&&bridge.allowed(op);}
-    private void say(String text){notice=text;if(banner!=null)banner.setText(text);}
+    private void say(String text){notice=text;if(banner!=null){banner.setText(text);banner.setVisibility(text==null||text.isEmpty()?View.GONE:View.VISIBLE);}updateAppBar();}
     @Override public void ready(JSONObject s){try{session=s;actor=s.getJSONObject("user").getLong("id");retryAvailable=false;pollInFlight=false;
         // On a mode change, drop the cached list so PACKAGES is reloaded; PENDING rows then need fresh checks (no upload of local greens).
         boolean server=bridge.allowed("REEL_CHECK");if(server!=serverCheckMode){serverCheckMode=server;packagesOrder=0;packages=new JSONArray();if(liveOp!=null&&!StageRules.boardOperation(liveOp))stopLive();}say("Connected. Choose an order; no order is selected automatically.");showControls();if(!pending())loadOrders(false);}catch(Exception e){disconnected("Invalid session details.");}}
@@ -255,9 +308,15 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
     private void loadOrders(boolean more){if(!more)orders=new JSONArray();try{read("ORDERS",new JSONObject().put("after",more?nextOrders:0).put("limit",50));}catch(Exception e){say("Invalid order pagination.");}}
     private void select(JSONObject selected){if(!available())return;stopLive();packagesOrder=0;wrongReels.clear();recordedHere.clear();order=selected;route=null;proposal=null;packages=new JSONArray();progress=new JSONArray();page="order";read("ROUTE",null);}
     private void showPage(String p){page=p;proposal=null;showControls();if(!available())return;if("reels".equals(p))read("PACKAGES",null);if("supplement".equals(p))read("DELIVERED_ITEMS",null);if("progress".equals(p)){progress=new JSONArray();read("PROGRESS",null);}}
-    private TextView text(String s,int size){TextView t=new TextView(this);t.setText(s);t.setTextSize(size);t.setPadding(0,10,0,10);body.addView(t);return t;}
-    private TextView colored(String s,int size,int color,int background){TextView t=text(s,size);t.setTextColor(color);if(background!=0){t.setBackgroundColor(background);t.setPadding(16,12,16,12);}
-        LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-1,-2);lp.setMargins(0,4,0,4);t.setLayoutParams(lp);return t;}
+    /** Plain body text (size: 24 = page title, 18-20 = section title, else body). */
+    private TextView text(String s,int size){
+        TextView t=size>=18?Ui.text(this,s,size>=22?20:16,Ui.TEXT,700):Ui.text(this,s,Math.min(size,15)-1,Ui.MUTED,500);
+        body.addView(t,Ui.block(this,size>=18?16:8));return t;}
+    /** Coloured strip; background 0 = coloured text only. */
+    private TextView colored(String s,int size,int color,int background){
+        TextView t=background==0?Ui.text(this,s,13.5f,color,600):Ui.notice(this,s,color,background);body.addView(t,Ui.block(this,8));return t;}
+    private LinearLayout addCard(int topDp){LinearLayout c=Ui.card(this);body.addView(c,Ui.block(this,topDp));return c;}
+    private TextView sectionTitle(String s){TextView t=Ui.text(this,s,13,Ui.MUTED,700);t.setLetterSpacing(0.06f);t.setAllCaps(true);body.addView(t,Ui.block(this,18));return t;}
     // ---- Reel gate ----
     private boolean reelsKnown(){return order!=null&&packagesOrder==order.optLong("order_id");}
     // Reel verification is local to this phone: scanning a reel of the reference list marks it green; nothing is sent to the server.
@@ -291,18 +350,30 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
         if(!wrongReels.isEmpty()&&wrongReels.get(0)[0].equals(label)&&wrongReels.get(0)[1].equals(reason)){wrongReels.get(0)[2]=time;}
         else{wrongReels.add(0,new String[]{label,reason,time});while(wrongReels.size()>50)wrongReels.remove(wrongReels.size()-1);}
     }
-    private void renderReelGate(){
-        if(serverCheckMode)colored("Server reel check — shared with all operators (refreshes every 10 s).",15,0xff1565c0,0xffe3f2fd);
-        else colored("LOCAL VERIFICATION — stored on this phone only, not on the server. Use one phone per order.",15,0xff8d6e00,0xfffff8e1);
-        if(!reelsKnown()){text("Reels: loading the reference list…",16);return;}
-        if(serverCheckMode&&verified().length()>0)colored(verified().length()+" phone-only checks from local mode are not used; re-scan those reels.",15,RED,0);
-        List<String> missing=missingReels();int total=packages.length();
-        if(total>0&&missing.isEmpty())colored("Reels: all "+total+" verified ✓ — PCB stages unlocked.",17,GREEN,GREEN_BG);
-        else colored("Reels verified: "+(total-missing.size())+" / "+total+(total==0?" (no reference list)":""),17,RED,RED_BG);
+    /** Reel summary card: count, progress bar, lock state and verification mode. */
+    private void renderReelSummary(boolean withModeNotice){
+        LinearLayout c=addCard(10);
+        LinearLayout top=Ui.row(this);top.addView(Ui.icon(this,"🧵",Ui.GREEN_BG,38));
+        LinearLayout tt=new LinearLayout(this);tt.setOrientation(1);tt.setPadding(Ui.dp(this,12),0,0,0);
+        tt.addView(Ui.text(this,"REELS",11.5f,Ui.MUTED,700));
+        if(!reelsKnown()){tt.addView(Ui.text(this,"Loading reference list…",15,Ui.TEXT,600));top.addView(tt,Ui.weight(1));c.addView(top);return;}
+        List<String> missing=missingReels();int total=packages.length(),done=total-missing.size();
+        tt.addView(Ui.text(this,done+" / "+total+(total==0?"  no reference list":"  verified"),20,Ui.TEXT,800));top.addView(tt,Ui.weight(1));
+        String lock=reelLock();
+        top.addView(lock==null?Ui.chip(this,"PCB unlocked",Ui.GREEN,Ui.GREEN_BG):Ui.chip(this,"🔒 PCB locked",0xFF475467,Ui.GREY_BG));
+        c.addView(top);
+        View bar=Ui.progress(this,total==0?0:(float)done/total,missing.isEmpty()&&total>0?Ui.GREEN:Ui.NAVY2);LinearLayout.LayoutParams bp=(LinearLayout.LayoutParams)bar.getLayoutParams();bp.topMargin=Ui.dp(this,12);c.addView(bar);
+        if(serverCheckMode&&verified().length()>0)c.addView(Ui.text(this,verified().length()+" phone-only checks from local mode are not used; re-scan those reels.",12.5f,Ui.RED,600),Ui.block(this,10));
+        if(withModeNotice)c.addView(serverCheckMode?Ui.notice(this,"Server reel check — shared with all operators, refreshed every 10 s.",Ui.NAVY2,Ui.BLUE_BG)
+            :Ui.notice(this,"⚠  Local verification — stored on this phone only. Use one phone per order.",Ui.AMBER,Ui.AMBER_BG),Ui.block(this,12));
+    }
+    /** Lock reason with override / remove-override actions. */
+    private void renderLockControls(){
+        if(!reelsKnown())return;List<String> missing=missingReels();int total=packages.length();
         JSONObject o=reelOverride();String lock=reelLock();
-        if(lock!=null){colored("PCB stages locked: "+lock,16,RED,0);button("Override reel lock (this phone only)…",true,()->confirmReelOverride(missing));}
-        else if(o!=null&&!(total>0&&missing.isEmpty()))colored("Reel lock overridden on this phone by user "+o.optLong("actor")+" at "+o.optString("at")+"\nReason: "+o.optString("reason"),15,RED,0);
-        if(o!=null)button("Remove reel-lock override",true,()->{gatePrefs().edit().remove("order_"+order.optLong("order_id")).apply();if(liveOp!=null&&reelLockedFor(liveOp))stopLive();render();});
+        if(lock!=null){colored("PCB stages locked: "+lock,13,Ui.RED,0);button("Override reel lock (this phone only)…",Ui.DANGER,true,()->confirmReelOverride(missing));}
+        else if(o!=null&&!(total>0&&missing.isEmpty()))colored("Reel lock overridden on this phone by user "+o.optLong("actor")+" at "+o.optString("at")+"\nReason: "+o.optString("reason"),13,Ui.AMBER,Ui.AMBER_BG);
+        if(o!=null)button("Remove reel-lock override",Ui.TEXT_BTN,true,()->{gatePrefs().edit().remove("order_"+order.optLong("order_id")).apply();if(liveOp!=null&&reelLockedFor(liveOp))stopLive();render();});
     }
     private void confirmReelOverride(List<String> missing){
         EditText reason=new EditText(this);reason.setHint("Reason for starting PCB stages without all reels");
@@ -316,68 +387,92 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
             }catch(Exception e){reason.setError("Could not save the override.");}
         }));dialog.show();
     }
-    private void button(String title,boolean enabled,Runnable action){Button b=new Button(this);b.setText(title);b.setEnabled(enabled);b.setOnClickListener(v->action.run());body.addView(b);}
+    private void button(String title,boolean enabled,Runnable action){button(title,Ui.OUTLINE,enabled,action);}
+    private Button button(String title,int kind,boolean enabled,Runnable action){Button b=Ui.button(this,title,kind,enabled,action);body.addView(b,Ui.block(this,8));return b;}
     private void render(){
-        if(destroying||body==null)return;body.removeAllViews();banner.setText(notice);
+        if(destroying||body==null)return;body.removeAllViews();banner.setText(notice);banner.setVisibility(notice==null||notice.isEmpty()?View.GONE:View.VISIBLE);
         if(liveOp!=null&&(order==null||!("pcb".equals(page)||"reels".equals(page))||reelLockedFor(liveOp)))stopLive();
-        if(!lastOutcome.isEmpty())text("Previous server result:\n"+lastOutcome,17);
-        if(storageFailed)text("Saved-request storage is unavailable. New submissions are disabled; you may leave.",16);
+        updateAppBar();
+        if(storageFailed)colored("Saved-request storage is unavailable. New submissions are disabled; you may leave.",13,Ui.RED,Ui.RED_BG);
         if(pending()){
-            text("Unresolved request — "+journal.order()+". This does not block the normal warehouse production workflow. You can leave and return later.",16);
+            LinearLayout c=addCard(8);c.setBackground(Ui.shape(this,Ui.AMBER_BG,18,0));c.setElevation(0);
+            c.addView(Ui.text(this,"Unresolved request — "+journal.order(),14.5f,Ui.AMBER,700));
+            c.addView(Ui.text(this,"New board scans wait until this is resolved. Normal warehouse production is not blocked.",12.5f,Ui.AMBER,500),Ui.block(this,4));
             if(journal.belongs(actor)){
-                button("Check saved request status",available(),this::recover);
-                if(retryAvailable)button("Retry original saved request",available(),()->new AlertDialog.Builder(this).setTitle("Retry the same request?").setMessage("The server found no committed result. Reuse the original request ID and exact payload?").setNegativeButton("Cancel",null).setPositiveButton("Retry original",(d,w)->retry()).show());
-            }else text("Sign in as the original operator to recover this request.",16);
+                c.addView(Ui.button(this,"Check saved request status",Ui.PRIMARY,available(),this::recover),Ui.block(this,10));
+                if(retryAvailable)c.addView(Ui.button(this,"Retry original saved request",Ui.OUTLINE,available(),()->new AlertDialog.Builder(this).setTitle("Retry the same request?").setMessage("The server found no committed result. Reuse the original request ID and exact payload?").setNegativeButton("Cancel",null).setPositiveButton("Retry original",(d,w)->retry()).show()),Ui.block(this,8));
+            }else c.addView(Ui.text(this,"Sign in as the original operator to recover this request.",12.5f,Ui.AMBER,600),Ui.block(this,8));
         }
-        if(!"orders".equals(page))button("Back to orders",true,()->{page="orders";render();});
-        if("orders".equals(page)){
-            text("Active production orders",24);button("Refresh orders",available(),()->loadOrders(false));
-            if(orders.length()==0)text("No orders loaded. Only orders returned by the server appear here.",16);
-            for(int i=0;i<orders.length();i++){JSONObject o=orders.optJSONObject(i);if(o==null)continue;button(o.optString("order_number")+" · "+display(o,"product_part_number")+"\n"+o.optString("status")+" · Qty "+o.optInt("quantity")+" · "+display(o,"warehouse_code"),available(),()->select(o));}
-            if(nextOrders!=JSONObject.NULL)button("Load more orders",available(),()->loadOrders(true));return;
-        }
+        if("orders".equals(page)){renderOrders();return;}
         if(order==null)return;
-        text(order.optString("order_number"),24);
-        text("Product: "+display(order,"product_part_number")+"\nProduct OZCODE: "+display(order,"product_ozcode"),18);
-        if(order.opt("product_description") instanceof String&&!order.optString("product_description").trim().isEmpty())text(order.optString("product_description"),16);
-        text("Quantity: "+order.optInt("quantity")+"\nWarehouse: "+display(order,"warehouse_name")+" ("+display(order,"warehouse_code")+")\nStatus: "+order.optString("status"),16);
-        JSONObject control=route!=null?route:order;
-        text("Control mode: "+control.optString("mode","Not provided")+"\nScans required for production: "+(control.optBoolean("scans_required_for_production")?"Yes":"No"),16);
-        if("OBSERVATION".equals(control.optString("mode")))text("OBSERVATION: missing scans or connection loss do not block normal warehouse production. You can leave and resume later. Incorrect codes are still rejected.",16);
-        button("Order overview",true,()->{page="order";render();});
-        if("order".equals(page)){
-            button("Refresh order route",available(),()->read("ROUTE",null));
-            renderReelGate();button("Refresh reel status",available(),()->read("PACKAGES",null));
-            button("PCB stages / line entry"+(reelLock()==null?"":" (locked)"),route!=null&&reelLock()==null&&(bridge.allowed("PCB_ENTRY")||bridge.allowed("STAGE_PASSAGE")),()->showPage("pcb"));
-            button("Receive reels and packages",route!=null&&bridge.allowed("PACKAGE_RECEIPT"),()->showPage("reels"));
-            button("Request Supplemental Reel",route!=null&&bridge.allowed("SUPPLEMENT_RESERVE"),()->showPage("supplement"));
-            button("View progress",route!=null,()->showPage("progress"));
-            text("Scanning does not consume materials or finish production. Normal warehouse work remains separate.",15);return;
-        }
-        if("pcb".equals(page)||"reels".equals(page)){
-            if("pcb".equals(page)&&reelLock()!=null){colored("PCB stages locked: "+reelLock()+"\nReceive all reels first, or override from Order overview.",17,RED,RED_BG);return;}
-            String op="pcb".equals(page)?"PCB_ENTRY":"PACKAGE_RECEIPT";
-            if("reels".equals(page)){ // reel checks are order-level: not tied to a route step or station
-                button(liveOp!=null?"● Scanning reels":"Scan reels of this order",canScan(op),this::startReelScan);
-                button("Refresh reel list",available(),()->read("PACKAGES",null));renderPackages();return;
+        if("order".equals(page)){renderDashboard();return;}
+        if("pcb".equals(page)){
+            if(reelLock()!=null){
+                LinearLayout c=addCard(10);c.addView(Ui.text(this,"🔒  PCB stages are locked",16,Ui.TEXT,700));
+                c.addView(Ui.text(this,reelLock(),13,Ui.MUTED,500),Ui.block(this,6));
+                c.addView(Ui.button(this,"Go to reel check",Ui.PRIMARY,true,()->showPage("reels")),Ui.block(this,12));
+                renderLockControls();return;
             }
-            renderScanChoices(op);
-            if("pcb".equals(page)&&StageRules.canSkip(route,rejectedStage,stageError,order.optLong("order_id")))button("Review skipped stages and continue",canWrite("STAGE_PASSAGE"),this::confirmSkip);
-        }else if("supplement".equals(page))renderSupplement();else if("progress".equals(page))renderProgress();
+            if(!lastOutcome.isEmpty()&&liveOp==null)colored("Last server result: "+lastOutcome.replace("\n"," · "),13,Ui.MUTED,Ui.GREY_BG);
+            renderScanChoices("PCB_ENTRY");
+            if(StageRules.canSkip(route,rejectedStage,stageError,order.optLong("order_id")))button("Review skipped stages and continue",Ui.DANGER,canWrite("STAGE_PASSAGE"),this::confirmSkip);
+            return;
+        }
+        if("reels".equals(page)){renderPackages();return;}
+        if("supplement".equals(page))renderSupplement();else if("progress".equals(page))renderProgress();
+    }
+    private void renderOrders(){
+        LinearLayout head=Ui.row(this);head.addView(Ui.text(this,"Active orders",20,Ui.TEXT,800),Ui.weight(1));
+        head.addView(Ui.button(this,"↻  Refresh",Ui.TONAL,available(),()->loadOrders(false)));body.addView(head,Ui.block(this,10));
+        if(orders.length()==0){LinearLayout c=addCard(12);c.addView(Ui.text(this,session==null?"Sign in to load orders":"No orders loaded",15,Ui.TEXT,700));
+            c.addView(Ui.text(this,session==null?"Open the menu ⋮ → Sign in / connection.":"Only orders returned by the server appear here.",12.5f,Ui.MUTED,500),Ui.block(this,4));
+            if(session==null)c.addView(Ui.button(this,"Sign in",Ui.PRIMARY,true,()->showConnection(true)),Ui.block(this,12));}
+        for(int i=0;i<orders.length();i++){JSONObject o=orders.optJSONObject(i);if(o==null)continue;
+            LinearLayout c=addCard(10);c.setBackground(Ui.pressable(Ui.shape(this,Ui.SURFACE,18,0)));c.setClickable(available());c.setOnClickListener(v->select(o));c.setAlpha(available()?1f:0.55f);
+            LinearLayout top=Ui.row(this);top.addView(Ui.text(this,o.optString("order_number"),16.5f,Ui.TEXT,800),Ui.weight(1));
+            top.addView(Ui.chip(this,o.optString("status"),Ui.NAVY2,Ui.BLUE_BG));c.addView(top);
+            c.addView(Ui.oneLine(Ui.text(this,display(o,"product_part_number"),13.5f,Ui.TEXT,600)),Ui.block(this,6));
+            c.addView(Ui.text(this,"Qty "+o.optInt("quantity")+"   ·   "+display(o,"warehouse_code")+"   ·   "+o.optString("mode",""),12.5f,Ui.MUTED,500),Ui.block(this,2));
+        }
+        if(nextOrders!=JSONObject.NULL)button("Load more orders",Ui.TEXT_BTN,available(),()->loadOrders(true));
+    }
+    private void renderDashboard(){
+        JSONObject control=route!=null?route:order;
+        LinearLayout c=addCard(8);
+        LinearLayout top=Ui.row(this);LinearLayout tt=new LinearLayout(this);tt.setOrientation(1);
+        tt.addView(Ui.oneLine(Ui.text(this,display(order,"product_part_number"),15.5f,Ui.TEXT,700)));
+        if(order.opt("product_description") instanceof String&&!order.optString("product_description").trim().isEmpty()){TextView d=Ui.text(this,order.optString("product_description"),12,Ui.MUTED,500);d.setMaxLines(2);d.setEllipsize(android.text.TextUtils.TruncateAt.END);tt.addView(d,Ui.block(this,2));}
+        top.addView(tt,Ui.weight(1));String mode=control.optString("mode","");
+        if(!mode.isEmpty()){TextView chip=Ui.chip(this,mode,Ui.NAVY2,Ui.BLUE_BG);LinearLayout.LayoutParams cp=new LinearLayout.LayoutParams(-2,-2);cp.leftMargin=Ui.dp(this,8);top.addView(chip,cp);}
+        c.addView(top);
+        c.addView(Ui.text(this,"Qty  "+order.optInt("quantity")+"     Warehouse  "+display(order,"warehouse_code")+"     "+order.optString("status")+"     OZ "+display(order,"product_ozcode"),12.5f,Ui.MUTED,600),Ui.block(this,10));
+        // tiles
+        String lock=reelLock();List<String> missing=reelsKnown()?missingReels():new ArrayList<>();int total=packages.length();
+        boolean pcbAllowed=route!=null&&(bridge.allowed("PCB_ENTRY")||bridge.allowed("STAGE_PASSAGE"));
+        LinearLayout r1=Ui.row(this),r2=Ui.row(this);
+        tile(r1,"🧵",Ui.GREEN_BG,"REELS",reelsKnown()?(total-missing.size())+" / "+total:"…",reelsKnown()&&total>0?(float)(total-missing.size())/total:-1,null,route!=null,()->showPage("reels"),true);
+        tile(r1,lock==null?"▦":"🔒",lock==null?Ui.BLUE_BG:Ui.GREY_BG,"PCB STAGES",lock==null?(steps("PCB_ENTRY").size()+steps("STAGE_PASSAGE").size())+" stages":"Locked",-1,lock==null?"Ready to scan":(reelsKnown()?missing.size()+" reels left":"Waiting for reels"),pcbAllowed,()->showPage("pcb"),false);
+        tile(r2,"＋",Ui.ORANGE_BG,"SUPPLEMENT","Request",-1,"Extra reel for this order",route!=null&&bridge.allowed("SUPPLEMENT_RESERVE"),()->showPage("supplement"),true);
+        tile(r2,"↗",Ui.BLUE_BG,"PROGRESS","Boards",-1,"Quantity "+order.optInt("quantity"),route!=null,()->showPage("progress"),false);
+        body.addView(r1,Ui.block(this,12));body.addView(r2,Ui.block(this,12));
+        body.addView(serverCheckMode?Ui.notice(this,"Server reel check — shared with all operators.",Ui.NAVY2,Ui.BLUE_BG)
+            :Ui.notice(this,"⚠  Local verification — reel checks are stored on this phone only. Use one phone per order.",Ui.AMBER,Ui.AMBER_BG),Ui.block(this,14));
+        renderLockControls();
+        if("OBSERVATION".equals(mode)){TextView t=Ui.text(this,"OBSERVATION: missing scans or connection loss do not block normal warehouse production. Scanning does not consume material.",11.5f,Ui.FAINT,500);body.addView(t,Ui.block(this,14));}
+    }
+    /** Dashboard tile; progress < 0 hides the bar. */
+    private void tile(LinearLayout row,String glyph,int iconBg,String label,String value,float progress,String sub,boolean enabled,Runnable open,boolean left){
+        LinearLayout t=Ui.card(this);t.setMinimumHeight(Ui.dp(this,128));t.setBackground(Ui.pressable(Ui.shape(this,enabled?Ui.SURFACE:0xFFFAFBFC,20,0)));
+        t.setClickable(enabled);t.setOnClickListener(v->open.run());t.setAlpha(enabled?1f:0.6f);
+        t.addView(Ui.icon(this,glyph,iconBg,38));
+        t.addView(Ui.text(this,label,11.5f,Ui.MUTED,700),Ui.block(this,10));
+        t.addView(Ui.oneLine(Ui.text(this,value,20,Ui.TEXT,800)),Ui.block(this,2));
+        if(progress>=0){View bar=Ui.progress(this,progress,progress>=1?Ui.GREEN:Ui.NAVY2);((LinearLayout.LayoutParams)bar.getLayoutParams()).topMargin=Ui.dp(this,8);t.addView(bar);}
+        if(sub!=null)t.addView(Ui.oneLine(Ui.text(this,sub,11.5f,Ui.MUTED,500)),Ui.block(this,4));
+        LinearLayout.LayoutParams p=Ui.weight(1);if(left)p.rightMargin=Ui.dp(this,6);else p.leftMargin=Ui.dp(this,6);row.addView(t,p);
     }
     private List<JSONObject> steps(String operation){List<JSONObject> out=new ArrayList<>();if(route==null)return out;JSONArray a=route.optJSONArray("steps");if(a!=null)for(int i=0;i<a.length();i++){JSONObject s=a.optJSONObject(i);if(s!=null&&s.optBoolean("enabled")&&operation.equals(s.optString("operation")))out.add(s);}out.sort(Comparator.comparingInt(s->s.optInt("sequence")));return out;}
     private boolean contains(JSONArray a,String id){if(a!=null)for(int i=0;i<a.length();i++)if(id.equals(a.optString(i)))return true;return false;}
-    private void renderScanChoices(String operation){
-        text("Choose the server-authorized stage and station",18);List<JSONObject> choices=steps(operation);
-        if("PCB_ENTRY".equals(operation)){choices.addAll(steps("STAGE_PASSAGE"));choices.sort(Comparator.comparingInt(s->s.optInt("sequence")));}
-        for(JSONObject step:choices){String stageOperation=step.optString("operation");String side=step.isNull("side")?"Not applicable":step.optString("side");text(step.optInt("sequence")+". "+stageLabel(step)+" · Side: "+side,16);
-            JSONArray stations=route.optJSONArray("stations");if(stations==null)continue;
-            for(int j=0;j<stations.length();j++){JSONObject station=stations.optJSONObject(j);if(station==null||!station.optBoolean("enabled")||!contains(station.optJSONArray("step_ids"),step.optString("step_id")))continue;
-                boolean active=liveOp!=null&&liveStep!=null&&liveStation!=null&&step.optString("step_id").equals(liveStep.optString("step_id"))&&station.optString("station_id").equals(liveStation.optString("station_id"));
-                button((active?"● Scanning at ":"Scan at ")+station.optString("name"),canScan(stageOperation),()->startLive(stageOperation,step,station));}
-        }
-        if(choices.isEmpty())text("No enabled stage for this operation was returned by the server.",16);
-    }
     private String packageText(JSONObject p){return p.optString("package_code")+" · "+p.optString("part_number")+" / "+p.optString("ozcode")+"\n"+p.optString("description")+"\n"+p.optInt("current_quantity")+" "+p.optString("unit")+" · "+p.optString("warehouse")+" / "+p.optString("location");}
     private static String stageLabel(JSONObject step){return step.opt("label") instanceof String&&!step.optString("label").isEmpty()?step.optString("label"):step.optString("step_id");}
     private static String nullable(JSONObject data,String key){return data.has(key)&&!data.isNull(key)?String.valueOf(data.opt(key)):"None";}
@@ -392,26 +487,80 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
             JSONObject payload=StageRules.skippedPayload(rejected,reason.getText().toString());dialog.dismiss();rejectedStage=null;stageError=null;submit("STAGE_PASSAGE",payload);
         }catch(Exception e){reason.setError("Enter a reason of 1–1000 characters.");}}));dialog.show();
     }
-    /** Reference list: green = received (server), black = still to scan, red = wrong scans on this phone (not recorded). */
-    private void renderPackages(){
-        renderReelGate();
-        if(!wrongReels.isEmpty()){colored("Wrong scans — not recorded ("+wrongReels.size()+")",17,RED,0);
-            for(String[] w:wrongReels)colored("✗ "+w[0]+"\n"+w[1]+" · "+w[2],15,RED,RED_BG);
-            button("Clear wrong-scan list",true,()->{wrongReels.clear();render();});}
-        JSONObject v=verified();
-        if(reelsKnown()){text("Reference reels",18);
-            if(!serverCheckMode&&v.length()>0)button("Reset reel verification on this phone…",true,()->new AlertDialog.Builder(this).setTitle("Reset reel verification?").setMessage("All "+v.length()+" reels verified on this phone for "+order.optString("order_number")+" turn black again and PCB stages lock again. Nothing changes on the server.")
-                .setNegativeButton("Cancel",null).setPositiveButton("Reset",(d,w)->{verifyPrefs().edit().remove("order_"+order.optLong("order_id")).commit();wrongReels.clear();if(liveOp!=null&&reelLockedFor(liveOp))stopLive();render();}).show());}
-        for(int i=0;i<packages.length();i++){JSONObject p=packages.optJSONObject(i);boolean received=isGreen(p,v);JSONObject mark=v.optJSONObject(p.optString("package_code"));
-            String state=serverCheckMode?(received?"Checked on server by user "+nullable(p,"checked_by_user_id")+" · "+nullable(p,"checked_at"):"Not yet checked")
-                :mark!=null?"Local verification on this phone · "+mark.optString("at"):"RECEIVED".equals(p.optString("receipt_status"))?"Received (server)":"Not yet scanned";
-            colored((received?"✓ ":"○ ")+packageText(p)+"\n"+state+(p.optBoolean("supplemental")?" · Supplemental":"")+(p.optBoolean("transfer_required")?"\n⚠ Warehouse transfer required":""),16,received?GREEN:Color.BLACK,received?GREEN_BG:0xfff5f5f5);
-            if(p.optBoolean("supplemental")&&!"DELIVERED".equals(p.optString("handover_status")))button("Confirm supplemental handover",canWrite("SUPPLEMENT_DELIVER")&&!p.optBoolean("transfer_required"),()->confirmDelivery(p));
-            if(p.optBoolean("transfer_required"))text("Warehouse transfer required through the existing inventory workflow.",15);
+    private void renderScanChoices(String operation){
+        List<JSONObject> choices=steps(operation);
+        if("PCB_ENTRY".equals(operation)){choices.addAll(steps("STAGE_PASSAGE"));choices.sort(Comparator.comparingInt(s->s.optInt("sequence")));}
+        if(choices.isEmpty()){LinearLayout c=addCard(10);c.addView(Ui.text(this,"No enabled stage was returned by the server.",14,Ui.MUTED,600));return;}
+        if(liveOp==null)sectionTitle("Choose stage and station");
+        for(JSONObject step:choices){String stageOperation=step.optString("operation");
+            boolean stepLive=liveOp!=null&&liveStep!=null&&step.optString("step_id").equals(liveStep.optString("step_id"));
+            LinearLayout c=addCard(10);LinearLayout top=Ui.row(this);
+            TextView n=Ui.icon(this,String.valueOf(step.optInt("sequence")),Ui.BLUE_BG,40);n.setTextColor(Ui.NAVY);n.setTypeface(Ui.font(800));n.setTextSize(15);top.addView(n);
+            LinearLayout tt=new LinearLayout(this);tt.setOrientation(1);tt.setPadding(Ui.dp(this,12),0,Ui.dp(this,8),0);
+            tt.addView(Ui.oneLine(Ui.text(this,stageLabel(step),15,Ui.TEXT,700)));
+            String side=step.isNull("side")?"n/a":step.optString("side");
+            tt.addView(Ui.oneLine(Ui.text(this,"Side "+side+" · "+("PCB_ENTRY".equals(stageOperation)?"entry":"passage")+(step.optBoolean("requires_result")?" · PASS/FAIL":""),12,Ui.MUTED,500)));
+            top.addView(tt,Ui.weight(1));
+            if(stepLive)top.addView(Ui.chip(this,"● Scanning",Ui.GREEN,Ui.GREEN_BG));
+            c.addView(top);
+            JSONArray stations=route.optJSONArray("stations");if(stations==null)continue;
+            LinearLayout chips=Ui.row(this);HorizontalScrollView hs=new HorizontalScrollView(this);hs.setHorizontalScrollBarEnabled(false);hs.addView(chips);
+            int count=0;
+            for(int j=0;j<stations.length();j++){JSONObject station=stations.optJSONObject(j);if(station==null||!station.optBoolean("enabled")||!contains(station.optJSONArray("step_ids"),step.optString("step_id")))continue;
+                boolean active=stepLive&&liveStation!=null&&station.optString("station_id").equals(liveStation.optString("station_id"));
+                Button b=Ui.button(this,(active?"●  ":"⌗  ")+station.optString("name"),active?Ui.PRIMARY:Ui.OUTLINE,canScan(stageOperation),()->startLive(stageOperation,step,station));
+                LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-2,-2);p.rightMargin=Ui.dp(this,8);chips.addView(b,p);count++;}
+            if(count>0)c.addView(hs,Ui.block(this,12));else c.addView(Ui.text(this,"No enabled station for this stage.",12.5f,Ui.MUTED,500),Ui.block(this,8));
         }
     }
+    /** Reel page: summary, scan action, filter and the reference list (green = verified, ring = pending, red = wrong scan). */
+    private void renderPackages(){
+        renderReelSummary(liveOp==null);
+        if(liveOp==null)button("⌗   Scan reels of this order",Ui.PRIMARY,canScan("PACKAGE_RECEIPT"),this::startReelScan);
+        JSONObject v=verified();int total=packages.length(),pending=reelsKnown()?missingReels().size():0,done=total-pending,wrong=wrongReels.size();
+        LinearLayout seg=Ui.row(this);seg.setBackground(Ui.shape(this,0xFFE9EDF4,12,0));int p3=Ui.dp(this,3);seg.setPadding(p3,p3,p3,p3);
+        String[][] tabs={{"all","All "+total},{"pending","Pending "+pending},{"done","Done "+done},{"wrong","Wrong "+wrong}};
+        for(String[] tab:tabs){boolean on=tab[0].equals(reelFilter);TextView t=Ui.text(this,tab[1],12.5f,on?Ui.NAVY:("wrong".equals(tab[0])&&wrong>0?Ui.RED:0xFF475467),on?700:600);
+            t.setGravity(Gravity.CENTER);t.setPadding(0,Ui.dp(this,8),0,Ui.dp(this,8));if(on){t.setBackground(Ui.shape(this,Ui.SURFACE,9,0));t.setElevation(Ui.dp(this,1));}
+            t.setOnClickListener(x->{reelFilter=tab[0];render();});seg.addView(t,Ui.weight(1));}
+        body.addView(seg,Ui.block(this,14));
+        LinearLayout list=Ui.card(this);list.setPadding(0,Ui.dp(this,2),0,Ui.dp(this,2));body.addView(list,Ui.block(this,10));
+        int rows=0;
+        if("all".equals(reelFilter)||"wrong".equals(reelFilter))for(String[] w:wrongReels){reelRow(list,'r',w[0],w[1]+" · "+w[2],null,null);rows++;}
+        if(!"wrong".equals(reelFilter))for(int i=0;i<packages.length();i++){JSONObject p=packages.optJSONObject(i);if(p==null)continue;boolean green=isGreen(p,v);
+            if("pending".equals(reelFilter)&&green||"done".equals(reelFilter)&&!green)continue;
+            JSONObject mark=v.optJSONObject(p.optString("package_code"));
+            String state=serverCheckMode?(green?"checked by user "+nullable(p,"checked_by_user_id"):null):(mark!=null?"verified "+mark.optString("at").replaceFirst("^\\d{4}-\\d{2}-\\d{2} ",""):"RECEIVED".equals(p.optString("receipt_status"))?"received (server)":null);
+            String sub=p.optString("part_number")+" · "+p.optString("description")+(state==null?"":"\n"+state)+(p.optBoolean("supplemental")?" · supplemental":"")+(p.optBoolean("transfer_required")?"\n⚠ warehouse transfer required":"");
+            reelRow(list,green?'g':'p',p.optString("package_code"),sub,p.optInt("current_quantity")+" "+p.optString("unit"),p.optString("location"));rows++;
+            if(p.optBoolean("supplemental")&&!"DELIVERED".equals(p.optString("handover_status"))){Button b=Ui.button(this,"Confirm supplemental handover",Ui.TONAL,canWrite("SUPPLEMENT_DELIVER")&&!p.optBoolean("transfer_required"),()->confirmDelivery(p));
+                LinearLayout.LayoutParams bp=Ui.block(this,0);bp.setMargins(Ui.dp(this,14),0,Ui.dp(this,14),Ui.dp(this,10));list.addView(b,bp);}
+        }
+        if(rows==0){TextView e=Ui.text(this,!reelsKnown()?"Loading…":"wrong".equals(reelFilter)?"No wrong scans":"Nothing in this filter",13,Ui.MUTED,500);e.setPadding(Ui.dp(this,16),Ui.dp(this,16),Ui.dp(this,16),Ui.dp(this,16));list.addView(e);}
+        LinearLayout actions=Ui.row(this);
+        actions.addView(Ui.button(this,"↻ Refresh",Ui.TEXT_BTN,available(),()->read("PACKAGES",null)));
+        if(wrong>0)actions.addView(Ui.button(this,"Clear wrong",Ui.TEXT_BTN,true,()->{wrongReels.clear();render();}));
+        if(!serverCheckMode&&v.length()>0){Button reset=Ui.button(this,"Reset local…",Ui.TEXT_BTN,true,()->new AlertDialog.Builder(this).setTitle("Reset reel verification?").setMessage("All "+v.length()+" reels verified on this phone for "+order.optString("order_number")+" turn back to pending and PCB stages lock again. Nothing changes on the server.")
+                .setNegativeButton("Cancel",null).setPositiveButton("Reset",(d,w)->{verifyPrefs().edit().remove("order_"+order.optLong("order_id")).commit();wrongReels.clear();if(liveOp!=null&&reelLockedFor(liveOp))stopLive();render();}).show());reset.setTextColor(Ui.RED);actions.addView(reset);}
+        body.addView(actions,Ui.block(this,8));
+    }
+    /** One compact list row: status circle, code + detail, quantity + location. */
+    private void reelRow(LinearLayout list,char kind,String code,String sub,String qty,String loc){
+        if(list.getChildCount()>0)list.addView(Ui.divider(this));
+        LinearLayout r=Ui.row(this);r.setPadding(Ui.dp(this,14),Ui.dp(this,10),Ui.dp(this,14),Ui.dp(this,10));
+        TextView st=Ui.text(this,kind=='g'?"✓":kind=='r'?"✗":"",12.5f,kind=='g'?Ui.GREEN:Ui.RED,800);st.setGravity(Gravity.CENTER);
+        st.setBackground(kind=='g'?Ui.shape(this,Ui.GREEN_BG,99,0):kind=='r'?Ui.shape(this,Ui.RED_BG,99,0):Ui.shape(this,Ui.SURFACE,99,0xFFD0D5DD));
+        r.addView(st,new LinearLayout.LayoutParams(Ui.dp(this,26),Ui.dp(this,26)));
+        LinearLayout tt=new LinearLayout(this);tt.setOrientation(1);tt.setPadding(Ui.dp(this,12),0,Ui.dp(this,8),0);
+        tt.addView(Ui.oneLine(Ui.text(this,code,13.5f,kind=='r'?Ui.RED:Ui.TEXT,700)));
+        TextView s=Ui.text(this,sub,11.5f,Ui.MUTED,500);s.setMaxLines(3);s.setEllipsize(android.text.TextUtils.TruncateAt.END);tt.addView(s);
+        r.addView(tt,Ui.weight(1));
+        if(qty!=null){LinearLayout q=new LinearLayout(this);q.setOrientation(1);q.setGravity(Gravity.END);
+            q.addView(Ui.text(this,qty,12.5f,Ui.TEXT,600));q.addView(Ui.text(this,loc==null?"":loc,11,Ui.MUTED,500));r.addView(q);}
+        list.addView(r);
+    }
     private void renderSupplement(){
-        text("Find an item already delivered to this order",18);EditText query=new EditText(this);query.setHint("Part number, OZCODE or description");body.addView(query);
+        text("Find an item already delivered to this order",18);EditText query=Ui.input(this,"Part number, OZCODE or description");body.addView(query,Ui.block(this,8));
         button("Search delivered items",available(),()->{try{read("DELIVERED_ITEMS",new JSONObject().put("q",query.getText().toString()));}catch(Exception e){say("Search unavailable.");}});
         for(int i=0;i<items.length();i++){JSONObject item=items.optJSONObject(i);if(item==null)continue;text(item.optString("part_number")+" / "+item.optString("ozcode")+"\n"+item.optString("description"),16);
             button("Request Supplemental Reel",canWrite("SUPPLEMENT_RESERVE"),()->new AlertDialog.Builder(this).setTitle("Request a package suggestion?").setMessage("Ask the server for a package of "+item.optString("part_number")+"? This does not reserve or consume stock.")
@@ -427,9 +576,9 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
         .setNegativeButton("Cancel",null).setPositiveButton("Confirm handover",(d,w)->{try{String name=line.getText().toString().trim();if(name.isEmpty()||name.length()>120){say("A valid receiving line name is required.");return;}submit("SUPPLEMENT_DELIVER",new JSONObject().put("route_version",route.getInt("route_version")).put("allocation_id",p.getLong("allocation_id")).put("line_name",name));}catch(Exception e){say("Invalid handover details.");}}).show();}
     private void renderProgress(){
         button("Refresh progress",available(),()->{progress=new JSONArray();read("PROGRESS",null);});
-        HorizontalScrollView horizontal=new HorizontalScrollView(this);TableLayout table=new TableLayout(this);horizontal.addView(table);body.addView(horizontal);
+        LinearLayout tableCard=addCard(12);tableCard.setPadding(0,Ui.dp(this,4),0,Ui.dp(this,4));HorizontalScrollView horizontal=new HorizontalScrollView(this);TableLayout table=new TableLayout(this);horizontal.addView(table);tableCard.addView(horizontal);
         List<JSONObject> columns=new ArrayList<>();if(route!=null){JSONArray a=route.optJSONArray("steps");for(int i=0;a!=null&&i<a.length();i++){JSONObject s=a.optJSONObject(i);if(s!=null&&"PCB".equals(s.optString("scope")))columns.add(s);}columns.sort(Comparator.comparingInt(s->s.optInt("sequence")));}
-        TableRow head=new TableRow(this);cell(head,"PCB");for(JSONObject s:columns)cell(head,s.optInt("sequence")+". "+stageLabel(s)+(s.isNull("side")?"":" / "+s.optString("side")));cell(head,"Quality / route completion");cell(head,"Expected stage / side");table.addView(head);
+        TableRow head=new TableRow(this);head.setTag(Boolean.TRUE);head.setBackgroundColor(Ui.GREY_BG);cell(head,"PCB");for(JSONObject s:columns)cell(head,s.optInt("sequence")+". "+stageLabel(s)+(s.isNull("side")?"":" / "+s.optString("side")));cell(head,"Quality / route completion");cell(head,"Expected stage / side");table.addView(head);
         Set<String> seen=new HashSet<>();for(int i=0;i<progress.length();i++){
             JSONObject p=progress.optJSONObject(i);if(p==null||!seen.add(p.optString("pcb_code")))continue;TableRow row=new TableRow(this);cell(row,p.optString("pcb_code"));JSONArray states=p.optJSONArray("steps");
             for(JSONObject s:columns){JSONObject found=null;for(int j=0;states!=null&&j<states.length();j++){JSONObject v=states.optJSONObject(j);if(v!=null&&s.optString("step_id").equals(v.optString("step_id")))found=v;}
@@ -443,7 +592,8 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
     }
     private static String display(JSONObject data,String key){Object value=data.opt(key);return value instanceof String&&!((String)value).trim().isEmpty()?(String)value:"Not provided";}
     private void stageDetails(String pcb,JSONObject detail){new AlertDialog.Builder(this).setTitle(pcb+" — "+stageLabel(detail)).setMessage("Side: "+nullable(detail,"side")+"\nStatus: "+nullable(detail,"status")+"\nQuality result: "+nullable(detail,"outcome")+"\nRecorded by user: "+nullable(detail,"recorded_by_user_id")+"\nTime: "+nullable(detail,"recorded_at")+"\nPaste thickness (µm): "+nullable(detail,"paste_thickness_um")+"\nNotes: "+nullable(detail,"notes")+"\nSkipped stages: "+nullable(detail,"skipped_step_ids")+"\nSkip reason: "+nullable(detail,"skip_reason")+"\n\nRepair and historical correction are not enabled.").setPositiveButton("Close",null).show();}
-    private void cell(TableRow row,String value){TextView t=new TextView(this);t.setText(value);t.setPadding(16,14,16,14);row.addView(t);}
+    private void cell(TableRow row,String value){TextView t=Ui.text(this,value,13,isHeader(row)?Ui.MUTED:Ui.TEXT,isHeader(row)?700:500);int h=Ui.dp(this,14),v=Ui.dp(this,10);t.setPadding(h,v,h,v);row.addView(t);}
+    private boolean isHeader(TableRow row){return Boolean.TRUE.equals(row.getTag());}
     /** Returns false only when nothing was saved or sent. Once journaled, the request is recoverable even if sending fails. */
     private boolean submit(String operation,JSONObject payload){if(!canWrite(operation)){say("Submission unavailable. Nothing new was sent; you may leave and return later.");return false;}try{
         payload.put("request_id",UUID.randomUUID().toString());JSONObject c=command(operation).put("payload",payload);journal.begin(actor,order,c);retryAvailable=false;
@@ -509,7 +659,8 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
             else if(!StageRules.boardOperation(sent.optString("operation")))read("PACKAGES",null);
         }
     }
-    @Override public void onBackPressed(){if(connection.getVisibility()==View.VISIBLE&&bridge.connected()){showControls();return;}if(liveOp!=null){stopLive();render();return;}if(!"orders".equals(page)){page="orders";render();}else finish();}
+    @Override public void onBackPressed(){if(connection.getVisibility()==View.VISIBLE){if(bridge.connected())showControls();else finish();return;}if(liveOp!=null){stopLive();render();return;}
+        if("order".equals(page)){page="orders";render();}else if(!"orders".equals(page)){page="order";proposal=null;render();}else finish();}
     @Override protected void onResume(){super.onResume();resumed=true;if(scanner!=null)scanner.resume();schedulePoll(POLL_MS);}
     @Override protected void onPause(){resumed=false;poller.removeCallbacks(pollTick);if(scanner!=null)scanner.pause();super.onPause();}
     @Override protected void onDestroy(){destroying=true;poller.removeCallbacksAndMessages(null);if(scanner!=null)scanner.release();if(bridge!=null)bridge.destroy();if(web!=null)web.destroy();super.onDestroy();}

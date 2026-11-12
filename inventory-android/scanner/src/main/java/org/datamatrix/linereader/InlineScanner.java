@@ -30,7 +30,7 @@ public final class InlineScanner extends LinearLayout {
     public static final int IDLE = 0, OK = 1, BAD = 2, WAIT = 3;
 
     private final TextureView texture; private final FrameLayout viewport; private final Overlay overlay;
-    private final Button light, sizeButton;
+    private final TextView light, sizeButton, badge; private Runnable onClose;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final AtomicBoolean analyzing = new AtomicBoolean();
     private ExecutorService decoder;
@@ -43,24 +43,34 @@ public final class InlineScanner extends LinearLayout {
 
     public InlineScanner(Context context) {
         super(context);
-        setOrientation(VERTICAL); setBackgroundColor(Color.BLACK); setLayoutDirection(LAYOUT_DIRECTION_LTR);
+        setOrientation(VERTICAL); setLayoutDirection(LAYOUT_DIRECTION_LTR);
         squareScale = Math.max(1, Math.min(3, context.getSharedPreferences("scanner", 0).getInt("square_scale", 1)));
         viewport = new FrameLayout(context); texture = new TextureView(context); overlay = new Overlay(context);
+        viewport.setBackgroundColor(0xFF151A22);
+        final float radius = dp(22);
+        viewport.setOutlineProvider(new ViewOutlineProvider() { @Override public void getOutline(View v, Outline o) { o.setRoundRect(0, 0, v.getWidth(), v.getHeight(), radius); } });
+        viewport.setClipToOutline(true);
         viewport.addView(texture); viewport.addView(overlay);
-        addView(viewport, new LayoutParams(-1, dp(260)));
-        LinearLayout controls = new LinearLayout(context);
-        Button focus = new Button(context); focus.setText("Focus"); focus.setOnClickListener(v -> focus());
-        controls.addView(focus, new LayoutParams(0, -2, 1));
-        light = new Button(context); light.setText("Light on");
-        light.setOnClickListener(v -> { torch = !torch; updateRequest(); light.setText(torch ? "Light off" : "Light on"); });
-        controls.addView(light, new LayoutParams(0, -2, 1));
-        sizeButton = new Button(context); sizeButton.setText("Square " + squareScale + "x");
+        badge = pill("Scanner"); badge.setTextSize(11.5f);
+        FrameLayout.LayoutParams bp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START); bp.setMargins(dp(10), dp(10), 0, 0);
+        viewport.addView(badge, bp);
+        TextView close = pill("✕"); close.setGravity(Gravity.CENTER); close.setPadding(0, 0, 0, 0);
+        close.setOnClickListener(v -> { if (onClose != null) onClose.run(); });
+        FrameLayout.LayoutParams cp = new FrameLayout.LayoutParams(dp(34), dp(34), Gravity.TOP | Gravity.END); cp.setMargins(0, dp(8), dp(8), 0);
+        viewport.addView(close, cp);
+        LinearLayout tools = new LinearLayout(context); tools.setGravity(Gravity.CENTER);
+        TextView focus = pill("◎  Focus"); focus.setOnClickListener(v -> focus());
+        light = pill("☀  Light");
+        light.setOnClickListener(v -> { torch = !torch; updateRequest(); styleLight(); });
+        sizeButton = pill("▢  " + squareScale + "×");
         sizeButton.setOnClickListener(v -> {
-            squareScale = squareScale % 3 + 1; sizeButton.setText("Square " + squareScale + "x"); epoch++;
+            squareScale = squareScale % 3 + 1; sizeButton.setText("▢  " + squareScale + "×"); epoch++;
             getContext().getSharedPreferences("scanner", 0).edit().putInt("square_scale", squareScale).apply(); mapping();
         });
-        controls.addView(sizeButton, new LayoutParams(0, -2, 1));
-        addView(controls);
+        for (TextView t : new TextView[]{focus, light, sizeButton}) { LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-2, -2); p.setMargins(dp(4), 0, dp(4), 0); tools.addView(t, p); }
+        FrameLayout.LayoutParams tp = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM); tp.bottomMargin = dp(10);
+        viewport.addView(tools, tp);
+        addView(viewport, new LayoutParams(-1, dp(250)));
         texture.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
             public void onSurfaceTextureAvailable(SurfaceTexture t, int w, int h) { open(); }
             public void onSurfaceTextureSizeChanged(SurfaceTexture t, int w, int h) { mapping(); }
@@ -71,6 +81,23 @@ public final class InlineScanner extends LinearLayout {
     }
 
     public void setListener(Listener l) { listener = l; }
+    /** Small label on the preview, e.g. "QR · reel label". */
+    public void setBadge(String text) { badge.setText(text); }
+    /** Called when the ✕ on the preview is tapped. */
+    public void setOnClose(Runnable r) { onClose = r; }
+    public void setPreviewHeightDp(int h) { viewport.getLayoutParams().height = dp(h); viewport.requestLayout(); }
+    private TextView pill(String s) {
+        TextView t = new TextView(getContext()); t.setText(s); t.setTextColor(Color.WHITE); t.setTextSize(12.5f);
+        t.setTypeface(Typeface.create(Typeface.DEFAULT, 600, false));
+        android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable(); g.setColor(0x47000000); g.setCornerRadius(dp(99));
+        t.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(0x33FFFFFF), g, null));
+        t.setPadding(dp(13), dp(7), dp(13), dp(7)); return t;
+    }
+    private void styleLight() {
+        light.setText(torch ? "☀  Light on" : "☀  Light");
+        android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable(); g.setColor(torch ? 0xE6F59E0B : 0x47000000); g.setCornerRadius(dp(99));
+        light.setBackground(g);
+    }
     public boolean isRunning() { return wanted; }
 
     /** Start (or switch) scanning for exactly one format: "DATA_MATRIX" or "QR_CODE". */
@@ -86,7 +113,7 @@ public final class InlineScanner extends LinearLayout {
         thread = new HandlerThread("InlineCamera"); thread.start(); cameraHandler = new Handler(thread.getLooper()); open();
     }
     public void pause() {
-        running = false; generation++; opening = false; crop = null; torch = false; light.setText("Light on");
+        running = false; generation++; opening = false; crop = null; torch = false; styleLight();
         if (session != null) { session.close(); session = null; }
         if (camera != null) { camera.close(); camera = null; }
         if (images != null) { images.close(); images = null; }
@@ -222,13 +249,21 @@ public final class InlineScanner extends LinearLayout {
     private final class Overlay extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         Overlay(Context c) { super(c); }
+        /** Soft dim outside the reading square and rounded corner brackets coloured by state. */
         @Override protected void onDraw(Canvas canvas) {
-            RectF box = square(); int tint = state == OK ? 0x5500C853 : state == BAD ? 0x66D50000 : state == WAIT ? 0x55FFAB00 : 0x88000000;
+            RectF box = square(); int tint = state == OK ? 0x3316A34A : state == BAD ? 0x40DC2626 : state == WAIT ? 0x33F59E0B : 0x66000000;
             paint.setStyle(Paint.Style.FILL); paint.setColor(tint);
             canvas.drawRect(0, 0, getWidth(), box.top, paint); canvas.drawRect(0, box.bottom, getWidth(), getHeight(), paint);
             canvas.drawRect(0, box.top, box.left, box.bottom, paint); canvas.drawRect(box.right, box.top, getWidth(), box.bottom, paint);
-            paint.setColor(state == OK ? Color.GREEN : state == BAD ? Color.RED : state == WAIT ? 0xFFFFAB00 : Color.CYAN);
-            paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(4 * getResources().getDisplayMetrics().density); canvas.drawRect(box, paint);
+            int color = state == OK ? 0xFF22C55E : state == BAD ? 0xFFEF4444 : state == WAIT ? 0xFFF59E0B : Color.WHITE;
+            float d = getResources().getDisplayMetrics().density, arm = Math.min(box.width() * 0.28f, 28 * d), r = 6 * d;
+            paint.setColor(color); paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(4 * d); paint.setStrokeCap(Paint.Cap.ROUND);
+            android.graphics.Path p = new android.graphics.Path();
+            p.moveTo(box.left, box.top + arm); p.lineTo(box.left, box.top + r); p.quadTo(box.left, box.top, box.left + r, box.top); p.lineTo(box.left + arm, box.top);
+            p.moveTo(box.right - arm, box.top); p.lineTo(box.right - r, box.top); p.quadTo(box.right, box.top, box.right, box.top + r); p.lineTo(box.right, box.top + arm);
+            p.moveTo(box.right, box.bottom - arm); p.lineTo(box.right, box.bottom - r); p.quadTo(box.right, box.bottom, box.right - r, box.bottom); p.lineTo(box.right - arm, box.bottom);
+            p.moveTo(box.left + arm, box.bottom); p.lineTo(box.left + r, box.bottom); p.quadTo(box.left, box.bottom, box.left, box.bottom - r); p.lineTo(box.left, box.bottom - arm);
+            canvas.drawPath(p, paint);
         }
     }
 }
