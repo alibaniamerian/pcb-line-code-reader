@@ -1,4 +1,4 @@
-# OZAK Inventory 0.8.0 — pilot test instructions
+# OZAK Inventory 0.9.0 — pilot test instructions
 
 Install the APK from the Inventory pilot release and open **OZAK Inventory**. Android 11 or newer is required. This is an internally tested pilot APK, not a public production rollout. It updates earlier pilots in place (same signing key); local login data is kept.
 
@@ -26,6 +26,19 @@ Install the APK from the Inventory pilot release and open **OZAK Inventory**. An
 7. Open **PCB stages / line entry** and tap **Scan at** for the correct stage, side and station. Every board read in the square is checked with the server and recorded automatically. Watch for the server's expected-stage note.
 8. For inspection stages, the board is read and checked first. Then tap **PASS** or **FAIL**. FAIL requires a note. **Discard read** drops the board without recording.
 9. The camera stays on for the next code. A code held in view is not recorded twice. A board already recorded at this stage on this phone is not resent. Tap **Stop camera** or go back to close the camera.
+
+## Two-sided assembly (prepared, activates with the server)
+
+When the server route carries `material_gate` (contract 1.3), each side is gated on its own reels:
+the first stage of a side (stencil entry) opens when every package placed on that side is verified;
+the other side's packages are not needed yet. A package used on both sides is checked once.
+The reel page then shows per-side counters and a side filter (All sides / BOTTOM / TOP), and each stage
+card shows its own lock reason. A package without a side mapping keeps every side locked until the server
+maps it (or a local override with a reason). With the current production server (no `material_gate`)
+the whole-order rule above still applies.
+
+If a code is read while the app is still refreshing, it is held (yellow "waiting for the server") and sent
+automatically. Paste thickness must be typed **before** scanning the board at the stencil-exit stage.
 
 ## Server reel check (prepared, not active)
 
