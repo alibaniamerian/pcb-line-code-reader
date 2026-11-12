@@ -1,10 +1,10 @@
 # OZAK Inventory Android pilot
 
-Version 0.3.1-stages-camera-pilot, Android 11+. The original standalone camera project remains at the repository root. This directory contains the Inventory app and its pinned scanner integration.
+Version 0.5.1-reel-gate-pilot, Android 11+. The original standalone camera project remains at the repository root. This directory contains the Inventory app and its pinned scanner integration.
 
 See [English pilot instructions](docs/PILOT_TEST_EN.md). Download the Inventory APK from the release tagged `inventory-v0.3.1-pilot`; do not confuse it with the standalone PCB reader or synthetic sandbox apps.
 
-The operator app uses embedded WebView authentication and server-provided orders, routes, sides and stations. Submissions require explicit operator action. Unknown requests are retained privately for recovery. OBSERVATION does not block normal warehouse production. No consumption operation is exposed.
+The operator app uses embedded WebView authentication and server-provided orders, routes, sides and stations. The operator explicitly chooses the stage and station; the camera then runs inside that screen and each valid code is recorded automatically (inspection stages still require an explicit PASS/FAIL, FAIL requires a note). Reel labels are validated locally with the server label rules before sending. PCB stages are locked in the app until every package returned by PACKAGES is RECEIVED, unless the operator records a local override with a reason (app-side policy; not enforced by the server). Unknown requests are retained privately for recovery. OBSERVATION does not block normal warehouse production. No consumption operation is exposed.
 
 ## Build
 
@@ -14,4 +14,4 @@ The `-OperatorSandbox` switch builds a separate localhost-only test package. Ser
 
 ## Verification and limits
 
-The stage harness passed 36 API checks in an isolated single-user SQLite sandbox. A separate normal-UI camera test recorded one PCB across eight stages and received one reel independently, with unchanged inventory and zero consumption. These results do not establish PostgreSQL concurrency, multi-operator acceptance or general readability of tiny engraved marks. Pilot UI has a known auxiliary scanner-status clipping limitation.
+The stage harness passed 36 API checks in an isolated single-user SQLite sandbox. A separate normal-UI camera test recorded one PCB across eight stages and received one reel independently, with unchanged inventory and zero consumption. These results do not establish PostgreSQL concurrency, multi-operator acceptance or general readability of tiny engraved marks. These results predate 0.4/0.5: the embedded automatic camera and the reel lock built and install cleanly but have not yet been tested against a live pilot order.

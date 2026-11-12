@@ -9,8 +9,8 @@ android {
         applicationId 'com.ozak.inventory'
         minSdk 30
         targetSdk 36
-        versionCode 5
-        versionName '0.3.1-stages-camera-pilot'
+        versionCode 8
+        versionName '0.5.1-reel-gate-pilot'
         testInstrumentationRunner 'com.ozak.inventory.OperatorInstrumentation'
     }
     compileOptions {
