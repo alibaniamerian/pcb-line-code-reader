@@ -69,7 +69,7 @@ public final class MainActivity extends Activity {
         android.content.Intent scanner = new android.content.Intent().setClassName(this,"org.datamatrix.linereader.InventoryScannerActivity");
         button("Open PCB / QR Scanner", () -> startActivityForResult(scanner,81), scanner.resolveActivity(getPackageManager()) != null);
         label("Select the order, stage and station from the server's available options.", 16);
-        label("Receive every reel of the order first; PCB stages unlock when all reference reels are green. Valid codes are recorded automatically. Scanning does not record material consumption or finished production.", 16);
+        label("Check every reel of the order first (local verification on this phone; one phone per order). PCB stages unlock when all reference reels are green; boards are then recorded automatically. Scanning does not record material consumption or finished production.", 16);
         button("Clear Local Login Data", () -> new AlertDialog.Builder(this)
             .setMessage("Clear this app's cookies and login data? This does not sign you out on the server.")
             .setNegativeButton("Cancel", null).setPositiveButton("Clear", (d,w) -> clearSession()).show(), true);

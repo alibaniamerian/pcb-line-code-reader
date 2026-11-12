@@ -12,9 +12,20 @@ final class OperatorRules {
         if(a instanceof JSONArray&&b instanceof JSONArray){JSONArray x=(JSONArray)a,y=(JSONArray)b;if(x.length()!=y.length())return false;for(int i=0;i<x.length();i++)if(!same(x.get(i),y.get(i)))return false;return true;}
         return Objects.equals(a,b);
     }
+    /**
+     * Write acceptance. Request identity (request_id, order) must always match. When the server sends
+     * requesting_user_id, the requester must be the current user, while the original recorder of an
+     * ALREADY_RECORDED event may be someone else (multi-operator). A new event must be recorded by the requester.
+     * Without requesting_user_id (older contract) the recorder must be the current user, as before.
+     */
     static boolean success(JSONObject command,long actor,JSONObject result)throws JSONException {
-        String outcome=result.optString("outcome");return command.getJSONObject("payload").getString("request_id").equals(result.optString("request_id"))
-            &&command.getLong("order_id")==result.optLong("order_id")&&actor==result.optLong("recorded_by_user_id")
+        String outcome=result.optString("outcome");long recorder=result.optLong("recorded_by_user_id");
+        boolean identity;
+        if(result.has("requesting_user_id")&&!result.isNull("requesting_user_id"))
+            identity=result.optLong("requesting_user_id")==actor&&recorder>0&&("ALREADY_RECORDED".equals(outcome)||recorder==actor);
+        else identity=recorder==actor;
+        return command.getJSONObject("payload").getString("request_id").equals(result.optString("request_id"))
+            &&command.getLong("order_id")==result.optLong("order_id")&&identity
             &&!result.optString("event_id").isEmpty()&&!result.optString("recorded_at").isEmpty()
             &&("ACCEPTED_NEW".equals(outcome)||"ALREADY_RECORDED".equals(outcome));
     }

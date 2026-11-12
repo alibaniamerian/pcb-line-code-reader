@@ -37,6 +37,20 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
     private long packagesOrder; private final List<String[]> wrongReels=new ArrayList<>();
     /** step_id|pcb_code confirmed by the server on this phone for the selected order; avoids resending (each new request is an audit record). */
     private final Set<String> recordedHere=new HashSet<>();
+    /**
+     * Server reel checks (REEL_CHECK) are used only when the server advertises "reel-checks". The mode is fixed per
+     * READY session and survives disconnects, so a lost connection never falls back to phone-only verification.
+     */
+    private boolean serverCheckMode,pollInFlight,resumed; private long pollBackoffUntil;
+    private final Handler poller=new Handler(Looper.getMainLooper());
+    private static final long POLL_MS=10000;
+    private final Runnable pollTick=()->{
+        schedulePoll(POLL_MS);
+        if(!resumed||!serverCheckMode||order==null||!("order".equals(page)||"reels".equals(page))||connection.getVisibility()==View.VISIBLE)return;
+        if(SystemClock.elapsedRealtime()<pollBackoffUntil||!available()||scanBusy||pending())return;
+        try{if(bridge.send(command("PACKAGES")))pollInFlight=true;}catch(Exception ignored){}
+    };
+    private void schedulePoll(long ms){poller.removeCallbacks(pollTick);poller.postDelayed(pollTick,ms);}
     private static final int GREEN=0xff2e7d32,GREEN_BG=0xffe8f5e9,RED=0xffc62828,RED_BG=0xffffebee;
     @Override public void onCreate(Bundle state){
         super.onCreate(state);getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);WebView.setWebContentsDebuggingEnabled(false);
@@ -87,8 +101,10 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
     }
     private void hideResult(){liveResult.setVisibility(View.GONE);liveNotes.setText("");}
     /** Opens the embedded camera for one server-authorized stage and station. */
+    /** Board scans write to the server; reel scans are verified on the phone only and need just the order and route. */
+    private boolean canScan(String op){return StageRules.boardOperation(op)?canWrite(op):serverCheckMode?canWrite("REEL_CHECK"):order!=null&&route!=null;}
     private void startLive(String op,JSONObject step,JSONObject station){
-        if(!canWrite(op)){say(pending()?"Resolve the saved request before scanning.":"Scanning is unavailable: not connected or not permitted.");render();return;}
+        if(!canScan(op)){say(pending()?"Resolve the saved request before scanning.":"Scanning is unavailable: not connected or not permitted.");render();return;}
         if(reelLockedFor(op)){say("PCB stages locked: "+reelLock());render();return;}
         try{
             scanOrder=order.getLong("order_id");scanActor=actor;scanOperation=op;scannedStep=new JSONObject(step.toString());
@@ -96,12 +112,16 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
         }catch(Exception e){say("Invalid stage details from server. Refresh the route.");return;}
         liveOp=op;liveStep=scannedStep;liveStation=station;boardDraft=null;boardContext=null;rejectedStage=null;stageError=null;scanBusy=false;lastCode="";
         boolean board=StageRules.boardOperation(op);
-        liveTitle.setText("Scanning: "+step.optInt("sequence")+". "+stageLabel(step)+" · Side: "+nullable(step,"side")+" · "+station.optString("name")+"\n"+(board?"PCB DataMatrix":"Reel QR label")+" — each valid code is recorded automatically.");
+        liveTitle.setText((board?"Scanning: "+step.optInt("sequence")+". "+stageLabel(step)+" · Side: "+nullable(step,"side")+" · "+station.optString("name"):"Reel check · "+order.optString("order_number"))+"\n"+(board?"PCB DataMatrix — each valid board is recorded on the server automatically.":(serverCheckMode?"Reel QR label — each valid reel is checked on the server and shared with other operators.":"Reel QR label — LOCAL VERIFICATION on this phone only; nothing is sent to the server. Use one phone per order.")));
         liveThickness.setText("");liveThickness.setVisibility("STAGE_PASSAGE".equals(op)&&step.optBoolean("allows_paste_measurement")?View.VISIBLE:View.GONE);
         hideResult();livePanel.setVisibility(View.VISIBLE);
         liveState(InlineScanner.IDLE,"Place the "+(board?"PCB code":"reel label")+" inside the square.");
         if(checkSelfPermission(Manifest.permission.CAMERA)!=PackageManager.PERMISSION_GRANTED)requestPermissions(new String[]{Manifest.permission.CAMERA},83);
         scanner.start(board?"DATA_MATRIX":"QR_CODE");render();
+    }
+    private void startReelScan(){
+        try{startLive("PACKAGE_RECEIPT",new JSONObject().put("step_id","reel-check").put("sequence",0).put("label","Reel check").put("side",JSONObject.NULL),new JSONObject().put("station_id","order").put("name","this order"));}
+        catch(Exception e){say("Could not start the reel scan.");}
     }
     private void stopLive(){
         if(scanner!=null)scanner.stop();if(livePanel!=null){livePanel.setVisibility(View.GONE);hideResult();}
@@ -133,24 +153,42 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
         if(raw.isEmpty()||raw.length()>4096||!(board?"DATA_MATRIX":"QR_CODE").equals(format)){liveState(InlineScanner.BAD,"Wrong code type — expected a "+(board?"PCB DataMatrix":"reel QR label")+". Nothing recorded.");if(!board){wrongReel(raw.length()>40?raw.substring(0,40)+"…":raw,"Wrong code type");render();}return;}
         if(reelLockedFor(liveOp)){stopLive();say("PCB stages locked: "+reelLock());render();return;}
         if(order==null||order.optLong("order_id")!=scanOrder||actor!=scanActor){stopLive();say("Order or operator changed. Choose the stage again; nothing recorded.");render();return;}
+        if(!board){verifyReel(raw);return;}
         if(!canWrite(liveOp)){liveState(InlineScanner.BAD,pending()?"A saved request is unresolved. Check its status first. Nothing recorded.":"Not connected or not permitted. Nothing recorded.");return;}
         try{
-            JSONObject payload=new JSONObject(scanContext.toString()).put(board?"pcb_code":"scan_text",raw);
-            if(board){
+            JSONObject payload=new JSONObject(scanContext.toString()).put("pcb_code",raw);
+            {
                 if(recordedHere.contains(liveStep.optString("step_id")+"|"+raw)){liveState(InlineScanner.OK,"Already recorded at this stage: "+raw+" (not resent).\nScan the next board.");return;}
                 boardDraft=payload;boardContext=null;scanBusy=true;liveState(InlineScanner.WAIT,"Read "+raw+" — checking with server…");
                 if(!read("BOARD_CONTEXT",new JSONObject().put("pcb_code",raw))){scanBusy=false;boardDraft=null;liveState(InlineScanner.BAD,"Could not reach the server. Nothing recorded.");}
-                return;
             }
-            String id=reelId(raw);JSONObject known=id==null?null:packageByCode(id);
-            if(id==null){String shown=raw.split("\\r?\\n")[0];shown=shown.length()>40?shown.substring(0,40)+"…":shown;liveState(InlineScanner.BAD,"Not an OZAK package label (needs \"OZAK POWER\" and one ID= line). Nothing recorded.");wrongReel(shown,"Not an OZAK package label");render();return;}
-            if(reelsKnown()&&known==null){liveState(InlineScanner.BAD,"Not a package of this order: "+id+". Nothing recorded.");wrongReel(id,"Not in this order's reference list");render();return;}
-            if(known!=null&&"RECEIVED".equals(known.optString("receipt_status"))){liveState(InlineScanner.BAD,"Already received: "+id+". Nothing recorded.");wrongReel(id,"Duplicate — already received");render();return;}
-            if(known!=null&&!"DELIVERED".equals(known.optString("handover_status"))){liveState(InlineScanner.BAD,"Handover not recorded yet for "+id+" ("+known.optString("handover_status")+"). Nothing recorded.");wrongReel(id,"Handover required before receipt");read("PACKAGES",null);render();return;}
-            if(known!=null&&known.optBoolean("transfer_required")){liveState(InlineScanner.BAD,"Warehouse transfer required for "+id+". Nothing recorded.");wrongReel(id,"Not at the order's warehouse — transfer required");read("PACKAGES",null);render();return;}
-            scanBusy=true;liveState(InlineScanner.WAIT,"Read "+(id==null?"label":id)+" — recording…");
-            if(!submit(liveOp,payload)){scanBusy=false;liveState(InlineScanner.BAD,"Not recorded: submission unavailable.");}
         }catch(Exception e){scanBusy=false;liveState(InlineScanner.BAD,"Invalid read. Nothing recorded.");}
+    }
+    /**
+     * Reel check against the server reference list. Server mode: sends REEL_CHECK (only when advertised) and turns green
+     * after the server confirms. Local mode: green is stored on this phone only and nothing is sent.
+     */
+    private void verifyReel(String raw){
+        String id=reelId(raw);
+        if(id==null){String shown=raw.split("\\r?\\n")[0];shown=shown.length()>40?shown.substring(0,40)+"…":shown;liveState(InlineScanner.BAD,"Not an OZAK package label (needs \"OZAK POWER\" and one ID= line).");wrongReel(shown,"Not an OZAK package label");render();return;}
+        if(!reelsKnown()){liveState(InlineScanner.BAD,"Reference list not loaded yet. Refresh the packages and scan again.");return;}
+        JSONObject known=packageByCode(id);
+        if(known==null){liveState(InlineScanner.BAD,"Not a reel of this order: "+id);wrongReel(id,"Not in this order's reference list");render();return;}
+        if(isGreen(known,verified())){
+            String by=serverCheckMode?" by user "+nullable(known,"checked_by_user_id")+" at "+nullable(known,"checked_at"):"";
+            liveState(InlineScanner.BAD,"Already checked: "+id+by);wrongReel(id,"Duplicate — already checked"+by);render();return;}
+        if(serverCheckMode){
+            if(!canWrite("REEL_CHECK")){liveState(InlineScanner.BAD,pending()?"A saved request is unresolved. Check its status first. Nothing sent.":"Not connected or not permitted. Nothing sent.");return;}
+            try{
+                JSONObject payload=new JSONObject().put("route_version",route.getInt("route_version")).put("scan_text",raw);
+                scanBusy=true;liveState(InlineScanner.WAIT,"Read "+id+" — checking on the server…");
+                if(!submit("REEL_CHECK",payload)){scanBusy=false;liveState(InlineScanner.BAD,"Not checked: submission unavailable.");}
+            }catch(Exception e){scanBusy=false;liveState(InlineScanner.BAD,"Invalid read. Nothing sent.");}
+            return;
+        }
+        markVerified(id);int left=missingReels().size();
+        liveState(InlineScanner.OK,"Verified ✓ "+id+" · "+known.optString("part_number")+"\n"+(packages.length()-left)+" / "+packages.length()+(left==0?" — all reels verified, PCB stages unlocked.":" verified · "+left+" left"));
+        render();
     }
     private String expectation(JSONObject context,JSONObject step){
         if(context==null||context.isNull("next_expected_step"))return "";
@@ -178,13 +216,17 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
     }
     /** Final server answer for a live write: green when recorded, red otherwise; camera stays on. */
     private void liveFinish(JSONObject sent,int status,JSONObject data){
-        if(liveOp==null||!liveOp.equals(sent.optString("operation")))return;
+        String op=sent.optString("operation");boolean reelCheck="REEL_CHECK".equals(op);
+        if(liveOp==null||!(liveOp.equals(op)||(reelCheck&&"PACKAGE_RECEIPT".equals(liveOp))))return;
         JSONObject p=sent.optJSONObject("payload");String code=p==null?"":p.has("pcb_code")?p.optString("pcb_code"):String.valueOf(reelId(p.optString("scan_text")));
         scanBusy=false;hideResult();liveThickness.setText("");
         if(status>=200&&status<300&&p!=null&&p.has("pcb_code"))recordedHere.add(p.optString("step_id")+"|"+p.optString("pcb_code"));
-        if(status>=200&&status<300)liveState(InlineScanner.OK,("ALREADY_RECORDED".equals(data.optString("outcome"))?"Already recorded (no duplicate): ":"Recorded ✓ ")+code+"\nScan the next code.");
+        if(status>=200&&status<300&&reelCheck){JSONObject d=data.optJSONObject("data");
+            if("ALREADY_RECORDED".equals(data.optString("outcome")))liveState(InlineScanner.OK,"Already checked: "+code+"\nby user "+(d==null?"?":nullable(d,"checked_by_user_id"))+" at "+(d==null?"?":nullable(d,"checked_at")));
+            else liveState(InlineScanner.OK,"Checked ✓ "+code+" (server)\nScan the next reel.");}
+        else if(status>=200&&status<300)liveState(InlineScanner.OK,("ALREADY_RECORDED".equals(data.optString("outcome"))?"Already recorded (no duplicate): ":"Recorded ✓ ")+code+"\nScan the next code.");
         else if(status>=500||status<200)liveState(InlineScanner.BAD,"Result unknown for "+code+". Check the saved request before scanning again.");
-        else{liveState(InlineScanner.BAD,"Rejected: "+code+"\n"+error(data)+" — nothing recorded.");if("PACKAGE_RECEIPT".equals(liveOp))wrongReel(code,"Rejected by server: "+error(data));}
+        else{liveState(InlineScanner.BAD,"Rejected: "+code+"\n"+error(data)+" — nothing recorded.");if(!StageRules.boardOperation(op))wrongReel(code,"Rejected by server: "+error(data));}
     }
     private void showConnection(boolean reload){if(liveOp!=null)stopLive();connection.setVisibility(View.VISIBLE);scroll.setVisibility(View.GONE);if(reload&&bridge!=null&&!bridge.connected())web.loadUrl(BridgePolicy.PAGE);}
     private void showControls(){connection.setVisibility(View.GONE);scroll.setVisibility(View.VISIBLE);render();}
@@ -192,8 +234,9 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
     private boolean available(){return bridge!=null&&bridge.connected()&&!bridge.busy();}
     private boolean canWrite(String op){return available()&&!storageFailed&&!pending()&&OperatorRules.order(order)&&OperatorRules.route(route,order.optLong("order_id"))&&order.optBoolean("accepting_scans")&&bridge.allowed(op);}
     private void say(String text){notice=text;if(banner!=null)banner.setText(text);}
-    @Override public void ready(JSONObject s){try{session=s;actor=s.getJSONObject("user").getLong("id");retryAvailable=false;say("Connected. Choose an order; no order is selected automatically.");showControls();if(!pending())loadOrders(false);}catch(Exception e){disconnected("Invalid session details.");}}
-    @Override public void disconnected(String reason){retryAvailable=false;say(reason);
+    @Override public void ready(JSONObject s){try{session=s;actor=s.getJSONObject("user").getLong("id");retryAvailable=false;pollInFlight=false;
+        boolean server=bridge.allowed("REEL_CHECK");if(server!=serverCheckMode){serverCheckMode=server;if(liveOp!=null&&!StageRules.boardOperation(liveOp))stopLive();}say("Connected. Choose an order; no order is selected automatically.");showControls();if(!pending())loadOrders(false);}catch(Exception e){disconnected("Invalid session details.");}}
+    @Override public void disconnected(String reason){retryAvailable=false;pollInFlight=false;say(reason);
         if(liveOp!=null&&scanBusy&&!destroying){scanBusy=false;boardDraft=null;hideResult();liveState(InlineScanner.BAD,reason);}
         if(!destroying&&body!=null)render();}
     private JSONObject command(String op)throws JSONException{JSONObject c=new JSONObject().put("operation",op);if(order!=null&&!"ORDERS".equals(op)&&!"REQUEST_STATUS".equals(op))c.put("order_id",order.getLong("order_id"));return c;}
@@ -206,7 +249,17 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
         LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-1,-2);lp.setMargins(0,4,0,4);t.setLayoutParams(lp);return t;}
     // ---- Reel gate ----
     private boolean reelsKnown(){return order!=null&&packagesOrder==order.optLong("order_id");}
-    private List<String> missingReels(){List<String> out=new ArrayList<>();for(int i=0;i<packages.length();i++){JSONObject p=packages.optJSONObject(i);if(p!=null&&!"RECEIVED".equals(p.optString("receipt_status")))out.add(p.optString("package_code"));}return out;}
+    // Reel verification is local to this phone: scanning a reel of the reference list marks it green; nothing is sent to the server.
+    private android.content.SharedPreferences verifyPrefs(){return getSharedPreferences("reel_verify",MODE_PRIVATE);}
+    private JSONObject verified(){if(order==null)return new JSONObject();try{return new JSONObject(verifyPrefs().getString("order_"+order.optLong("order_id"),"{}"));}catch(Exception e){return new JSONObject();}}
+    private void markVerified(String code){try{JSONObject v=verified();v.put(code,new JSONObject().put("actor",actor).put("at",new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss",Locale.US).format(new Date())));verifyPrefs().edit().putString("order_"+order.optLong("order_id"),v.toString()).commit();}catch(Exception e){say("Could not save the reel verification on this phone.");}}
+    /** Server mode: green only when the server reports CHECKED. Local mode: received on the server, or verified on this phone. */
+    private boolean isGreen(JSONObject p,JSONObject v){
+        if(p==null)return false;
+        if(serverCheckMode)return "CHECKED".equals(p.optString("check_status"));
+        return "RECEIVED".equals(p.optString("receipt_status"))||v.has(p.optString("package_code"));
+    }
+    private List<String> missingReels(){List<String> out=new ArrayList<>();JSONObject v=verified();for(int i=0;i<packages.length();i++){JSONObject p=packages.optJSONObject(i);if(p!=null&&!isGreen(p,v))out.add(p.optString("package_code"));}return out;}
     private int receivedReels(){return packages.length()-missingReels().size();}
     private android.content.SharedPreferences gatePrefs(){return getSharedPreferences("reel_gate",MODE_PRIVATE);}
     private JSONObject reelOverride(){if(order==null)return null;try{String v=gatePrefs().getString("order_"+order.optLong("order_id"),null);return v==null?null:new JSONObject(v);}catch(Exception e){return null;}}
@@ -219,7 +272,7 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
         List<String> missing=missingReels();
         if(packages.length()==0)return overrideCovers(missing)?null:"No active package allocations returned for this order — order data is incomplete. Report it, or override with a reason.";
         if(missing.isEmpty()||overrideCovers(missing))return null;
-        return missing.size()+" of "+packages.length()+" reels not yet received.";
+        return missing.size()+" of "+packages.length()+" reels not yet verified.";
     }
     private boolean reelLockedFor(String op){return StageRules.boardOperation(op)&&reelLock()!=null;}
     private void wrongReel(String label,String reason){
@@ -228,10 +281,13 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
         else{wrongReels.add(0,new String[]{label,reason,time});while(wrongReels.size()>50)wrongReels.remove(wrongReels.size()-1);}
     }
     private void renderReelGate(){
+        if(serverCheckMode)colored("Server reel check — shared with all operators (refreshes every 10 s).",15,0xff1565c0,0xffe3f2fd);
+        else colored("LOCAL VERIFICATION — stored on this phone only, not on the server. Use one phone per order.",15,0xff8d6e00,0xfffff8e1);
         if(!reelsKnown()){text("Reels: loading the reference list…",16);return;}
+        if(serverCheckMode&&verified().length()>0)colored(verified().length()+" phone-only checks from local mode are not used; re-scan those reels.",15,RED,0);
         List<String> missing=missingReels();int total=packages.length();
-        if(total>0&&missing.isEmpty())colored("Reels: all "+total+" received ✓ — PCB stages unlocked.",17,GREEN,GREEN_BG);
-        else colored("Reels received: "+(total-missing.size())+" / "+total+(total==0?" (no reference list)":""),17,RED,RED_BG);
+        if(total>0&&missing.isEmpty())colored("Reels: all "+total+" verified ✓ — PCB stages unlocked.",17,GREEN,GREEN_BG);
+        else colored("Reels verified: "+(total-missing.size())+" / "+total+(total==0?" (no reference list)":""),17,RED,RED_BG);
         JSONObject o=reelOverride();String lock=reelLock();
         if(lock!=null){colored("PCB stages locked: "+lock,16,RED,0);button("Override reel lock (this phone only)…",true,()->confirmReelOverride(missing));}
         else if(o!=null&&!(total>0&&missing.isEmpty()))colored("Reel lock overridden on this phone by user "+o.optLong("actor")+" at "+o.optString("at")+"\nReason: "+o.optString("reason"),15,RED,0);
@@ -290,10 +346,12 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
         if("pcb".equals(page)||"reels".equals(page)){
             if("pcb".equals(page)&&reelLock()!=null){colored("PCB stages locked: "+reelLock()+"\nReceive all reels first, or override from Order overview.",17,RED,RED_BG);return;}
             String op="pcb".equals(page)?"PCB_ENTRY":"PACKAGE_RECEIPT";
-            if("reels".equals(page)&&liveOp!=null){renderPackages();renderScanChoices(op);button("Refresh received / pending packages",available(),()->read("PACKAGES",null));return;}
+            if("reels".equals(page)){ // reel checks are order-level: not tied to a route step or station
+                button(liveOp!=null?"● Scanning reels":"Scan reels of this order",canScan(op),this::startReelScan);
+                button("Refresh reel list",available(),()->read("PACKAGES",null));renderPackages();return;
+            }
             renderScanChoices(op);
             if("pcb".equals(page)&&StageRules.canSkip(route,rejectedStage,stageError,order.optLong("order_id")))button("Review skipped stages and continue",canWrite("STAGE_PASSAGE"),this::confirmSkip);
-            if("reels".equals(page)){button("Refresh received / pending packages",available(),()->read("PACKAGES",null));renderPackages();}
         }else if("supplement".equals(page))renderSupplement();else if("progress".equals(page))renderProgress();
     }
     private List<JSONObject> steps(String operation){List<JSONObject> out=new ArrayList<>();if(route==null)return out;JSONArray a=route.optJSONArray("steps");if(a!=null)for(int i=0;i<a.length();i++){JSONObject s=a.optJSONObject(i);if(s!=null&&s.optBoolean("enabled")&&operation.equals(s.optString("operation")))out.add(s);}out.sort(Comparator.comparingInt(s->s.optInt("sequence")));return out;}
@@ -305,7 +363,7 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
             JSONArray stations=route.optJSONArray("stations");if(stations==null)continue;
             for(int j=0;j<stations.length();j++){JSONObject station=stations.optJSONObject(j);if(station==null||!station.optBoolean("enabled")||!contains(station.optJSONArray("step_ids"),step.optString("step_id")))continue;
                 boolean active=liveOp!=null&&liveStep!=null&&liveStation!=null&&step.optString("step_id").equals(liveStep.optString("step_id"))&&station.optString("station_id").equals(liveStation.optString("station_id"));
-                button((active?"● Scanning at ":"Scan at ")+station.optString("name"),canWrite(stageOperation),()->startLive(stageOperation,step,station));}
+                button((active?"● Scanning at ":"Scan at ")+station.optString("name"),canScan(stageOperation),()->startLive(stageOperation,step,station));}
         }
         if(choices.isEmpty())text("No enabled stage for this operation was returned by the server.",16);
     }
@@ -329,9 +387,14 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
         if(!wrongReels.isEmpty()){colored("Wrong scans — not recorded ("+wrongReels.size()+")",17,RED,0);
             for(String[] w:wrongReels)colored("✗ "+w[0]+"\n"+w[1]+" · "+w[2],15,RED,RED_BG);
             button("Clear wrong-scan list",true,()->{wrongReels.clear();render();});}
-        if(reelsKnown())text("Reference reels",18);
-        for(int i=0;i<packages.length();i++){JSONObject p=packages.optJSONObject(i);boolean received="RECEIVED".equals(p.optString("receipt_status"));
-            colored((received?"✓ ":"○ ")+packageText(p)+"\nReceipt: "+p.optString("receipt_status")+" · Handover: "+p.optString("handover_status")+(p.optBoolean("supplemental")?" · Supplemental":"")+(!received&&!"DELIVERED".equals(p.optString("handover_status"))?"\nAwaiting handover — cannot be received yet":"")+(!received&&p.optBoolean("transfer_required")?"\nWarehouse transfer required first":"")+(p.isNull("blocking_reason")?"":"\n"+p.optString("blocking_reason")),16,received?GREEN:Color.BLACK,received?GREEN_BG:0xfff5f5f5);
+        JSONObject v=verified();
+        if(reelsKnown()){text("Reference reels",18);
+            if(!serverCheckMode&&v.length()>0)button("Reset reel verification on this phone…",true,()->new AlertDialog.Builder(this).setTitle("Reset reel verification?").setMessage("All "+v.length()+" reels verified on this phone for "+order.optString("order_number")+" turn black again and PCB stages lock again. Nothing changes on the server.")
+                .setNegativeButton("Cancel",null).setPositiveButton("Reset",(d,w)->{verifyPrefs().edit().remove("order_"+order.optLong("order_id")).commit();wrongReels.clear();if(liveOp!=null&&reelLockedFor(liveOp))stopLive();render();}).show());}
+        for(int i=0;i<packages.length();i++){JSONObject p=packages.optJSONObject(i);boolean received=isGreen(p,v);JSONObject mark=v.optJSONObject(p.optString("package_code"));
+            String state=serverCheckMode?(received?"Checked on server by user "+nullable(p,"checked_by_user_id")+" · "+nullable(p,"checked_at"):"Not yet checked")
+                :mark!=null?"Local verification on this phone · "+mark.optString("at"):"RECEIVED".equals(p.optString("receipt_status"))?"Received (server)":"Not yet scanned";
+            colored((received?"✓ ":"○ ")+packageText(p)+"\n"+state+(p.optBoolean("supplemental")?" · Supplemental":"")+(p.optBoolean("transfer_required")?"\n⚠ Warehouse transfer required":""),16,received?GREEN:Color.BLACK,received?GREEN_BG:0xfff5f5f5);
             if(p.optBoolean("supplemental")&&!"DELIVERED".equals(p.optString("handover_status")))button("Confirm supplemental handover",canWrite("SUPPLEMENT_DELIVER")&&!p.optBoolean("transfer_required"),()->confirmDelivery(p));
             if(p.optBoolean("transfer_required"))text("Warehouse transfer required through the existing inventory workflow.",15);
         }
@@ -380,6 +443,14 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
     private void append(JSONArray target,JSONArray source)throws JSONException{for(int i=0;i<source.length();i++)target.put(source.getJSONObject(i));}
     @Override public void result(JSONObject sent,int status,JSONObject data){try{
         String op=sent.getString("operation");
+        if("PACKAGES".equals(op)&&pollInFlight){ // background refresh: quiet, never treats a failure as an empty list
+            pollInFlight=false;
+            if(status!=200){pollBackoffUntil=SystemClock.elapsedRealtime()+(status==429?60000:30000);return;}
+            if(order==null||sent.optLong("order_id")!=order.optLong("order_id"))return;
+            JSONArray items=data.getJSONArray("items");pollBackoffUntil=0;
+            if(reelsKnown()&&items.toString().equals(packages.toString()))return;
+            packages=items;packagesOrder=order.optLong("order_id");render();return;
+        }
         if("REQUEST_STATUS".equals(op)){
             if(!pending()||!journal.belongs(actor))throw new JSONException("journal");
             if(status==404&&"REQUEST_NOT_FOUND".equals(data.getJSONObject("error").getString("code"))){retryAvailable=true;say("No committed result found. Nothing was resent. Choose Retry original saved request if needed.");render();return;}
@@ -428,7 +499,7 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
         }
     }
     @Override public void onBackPressed(){if(connection.getVisibility()==View.VISIBLE&&bridge.connected()){showControls();return;}if(liveOp!=null){stopLive();render();return;}if(!"orders".equals(page)){page="orders";render();}else finish();}
-    @Override protected void onResume(){super.onResume();if(scanner!=null)scanner.resume();}
-    @Override protected void onPause(){if(scanner!=null)scanner.pause();super.onPause();}
-    @Override protected void onDestroy(){destroying=true;if(scanner!=null)scanner.release();if(bridge!=null)bridge.destroy();if(web!=null)web.destroy();super.onDestroy();}
+    @Override protected void onResume(){super.onResume();resumed=true;if(scanner!=null)scanner.resume();schedulePoll(POLL_MS);}
+    @Override protected void onPause(){resumed=false;poller.removeCallbacks(pollTick);if(scanner!=null)scanner.pause();super.onPause();}
+    @Override protected void onDestroy(){destroying=true;poller.removeCallbacksAndMessages(null);if(scanner!=null)scanner.release();if(bridge!=null)bridge.destroy();if(web!=null)web.destroy();super.onDestroy();}
 }

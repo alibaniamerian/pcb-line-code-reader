@@ -15,7 +15,9 @@ final class OperatorBridge {
     }
     static final Set<String> READS=new HashSet<>(Arrays.asList("SESSION","ORDERS","ROUTE","PROGRESS","PACKAGES","DELIVERED_ITEMS","SUPPLEMENT_PROPOSAL","REQUEST_STATUS","BOARD_CONTEXT"));
     static final Map<String,String> WRITES=new HashMap<>();
-    static {WRITES.put("PCB_ENTRY","pcb-entry");WRITES.put("STAGE_PASSAGE","stage-passages");WRITES.put("PACKAGE_RECEIPT","package-receipts");WRITES.put("SUPPLEMENT_RESERVE","supplement-reserve");WRITES.put("SUPPLEMENT_DELIVER","supplement-deliver");}
+    static {WRITES.put("PCB_ENTRY","pcb-entry");WRITES.put("STAGE_PASSAGE","stage-passages");WRITES.put("PACKAGE_RECEIPT","package-receipts");WRITES.put("SUPPLEMENT_RESERVE","supplement-reserve");WRITES.put("SUPPLEMENT_DELIVER","supplement-deliver");
+        // Proposed server-side reel check. Only usable when the server advertises "reel-checks" in enabled_operations.
+        WRITES.put("REEL_CHECK","reel-checks");}
     private final WebView web; private final Listener listener;
     private final Handler handler=new Handler(Looper.getMainLooper());
     private final Set<String> retired=new HashSet<>(), permissions=new HashSet<>();

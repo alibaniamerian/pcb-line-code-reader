@@ -1,10 +1,10 @@
 # OZAK Inventory Android pilot
 
-Version 0.5.1-reel-gate-pilot, Android 11+. The original standalone camera project remains at the repository root. This directory contains the Inventory app and its pinned scanner integration.
+Version 0.7.0-reel-check-ready-pilot, Android 11+. The original standalone camera project remains at the repository root. This directory contains the Inventory app and its pinned scanner integration.
 
 See [English pilot instructions](docs/PILOT_TEST_EN.md). Download the Inventory APK from the release tagged `inventory-v0.3.1-pilot`; do not confuse it with the standalone PCB reader or synthetic sandbox apps.
 
-The operator app uses embedded WebView authentication and server-provided orders, routes, sides and stations. The operator explicitly chooses the stage and station; the camera then runs inside that screen and each valid code is recorded automatically (inspection stages still require an explicit PASS/FAIL, FAIL requires a note). Reel labels are validated locally with the server label rules before sending. PCB stages are locked in the app until every package returned by PACKAGES is RECEIVED, unless the operator records a local override with a reason (app-side policy; not enforced by the server). Unknown requests are retained privately for recovery. OBSERVATION does not block normal warehouse production. No consumption operation is exposed.
+The operator app uses embedded WebView authentication and server-provided orders, routes, sides and stations. The operator explicitly chooses the stage and station; the camera then runs inside that screen and each valid PCB board is recorded automatically (inspection stages still require an explicit PASS/FAIL, FAIL requires a note). Reels are checked against the server PACKAGES list as a LOCAL VERIFICATION stored on the phone only (one phone per order); nothing is sent. The app is prepared for a server REEL_CHECK and switches to it only when the server advertises "reel-checks". PCB stages are locked in the app until every reference package is verified, unless the operator records a local override with a reason (app-side policy; not enforced by the server). Write acceptance checks request_id and order, and accepts ALREADY_RECORDED by another operator only when the server reports requesting_user_id equal to the current user. Unknown requests are retained privately for recovery. OBSERVATION does not block normal warehouse production. No consumption operation is exposed.
 
 ## Build
 

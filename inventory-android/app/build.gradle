@@ -9,8 +9,8 @@ android {
         applicationId 'com.ozak.inventory'
         minSdk 30
         targetSdk 36
-        versionCode 8
-        versionName '0.5.1-reel-gate-pilot'
+        versionCode 10
+        versionName '0.7.0-reel-check-ready-pilot'
         testInstrumentationRunner 'com.ozak.inventory.OperatorInstrumentation'
     }
     compileOptions {
