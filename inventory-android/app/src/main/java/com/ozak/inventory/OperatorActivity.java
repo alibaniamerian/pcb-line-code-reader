@@ -51,6 +51,16 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
         try{if(bridge.send(command("PACKAGES")))pollInFlight=true;}catch(Exception ignored){}
     };
     private void schedulePoll(long ms){poller.removeCallbacks(pollTick);poller.postDelayed(pollTick,ms);}
+    /**
+     * The bridge passes only the response body, not HTTP headers. Honours a Retry-After value (seconds) if the bridge
+     * exposes it as error.retry_after / error.retry_after_seconds / error.details.retry_after(_seconds); else the fallback.
+     */
+    static long retryAfterMs(JSONObject body,long fallback){
+        JSONObject e=body==null?null:body.optJSONObject("error");if(e==null)return fallback;JSONObject d=e.optJSONObject("details");
+        for(Object src:new Object[]{e,d})if(src instanceof JSONObject)for(String k:new String[]{"retry_after_seconds","retry_after"}){
+            double s=((JSONObject)src).optDouble(k,Double.NaN);if(!Double.isNaN(s)&&s>0)return (long)Math.min(s*1000,600000);}
+        return fallback;
+    }
     private static final int GREEN=0xff2e7d32,GREEN_BG=0xffe8f5e9,RED=0xffc62828,RED_BG=0xffffebee;
     @Override public void onCreate(Bundle state){
         super.onCreate(state);getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);WebView.setWebContentsDebuggingEnabled(false);
@@ -235,7 +245,8 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
     private boolean canWrite(String op){return available()&&!storageFailed&&!pending()&&OperatorRules.order(order)&&OperatorRules.route(route,order.optLong("order_id"))&&order.optBoolean("accepting_scans")&&bridge.allowed(op);}
     private void say(String text){notice=text;if(banner!=null)banner.setText(text);}
     @Override public void ready(JSONObject s){try{session=s;actor=s.getJSONObject("user").getLong("id");retryAvailable=false;pollInFlight=false;
-        boolean server=bridge.allowed("REEL_CHECK");if(server!=serverCheckMode){serverCheckMode=server;if(liveOp!=null&&!StageRules.boardOperation(liveOp))stopLive();}say("Connected. Choose an order; no order is selected automatically.");showControls();if(!pending())loadOrders(false);}catch(Exception e){disconnected("Invalid session details.");}}
+        // On a mode change, drop the cached list so PACKAGES is reloaded; PENDING rows then need fresh checks (no upload of local greens).
+        boolean server=bridge.allowed("REEL_CHECK");if(server!=serverCheckMode){serverCheckMode=server;packagesOrder=0;packages=new JSONArray();if(liveOp!=null&&!StageRules.boardOperation(liveOp))stopLive();}say("Connected. Choose an order; no order is selected automatically.");showControls();if(!pending())loadOrders(false);}catch(Exception e){disconnected("Invalid session details.");}}
     @Override public void disconnected(String reason){retryAvailable=false;pollInFlight=false;say(reason);
         if(liveOp!=null&&scanBusy&&!destroying){scanBusy=false;boardDraft=null;hideResult();liveState(InlineScanner.BAD,reason);}
         if(!destroying&&body!=null)render();}
@@ -445,7 +456,7 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
         String op=sent.getString("operation");
         if("PACKAGES".equals(op)&&pollInFlight){ // background refresh: quiet, never treats a failure as an empty list
             pollInFlight=false;
-            if(status!=200){pollBackoffUntil=SystemClock.elapsedRealtime()+(status==429?60000:30000);return;}
+            if(status!=200){pollBackoffUntil=SystemClock.elapsedRealtime()+(status==429?retryAfterMs(data,60000):30000);return;}
             if(order==null||sent.optLong("order_id")!=order.optLong("order_id"))return;
             JSONArray items=data.getJSONArray("items");pollBackoffUntil=0;
             if(reelsKnown()&&items.toString().equals(packages.toString()))return;
