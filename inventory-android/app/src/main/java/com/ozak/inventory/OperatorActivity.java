@@ -36,6 +36,8 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
     // App bar and live-result row
     private LinearLayout appBar,liveRow; private TextView appTitle,appSub,onlinePill,liveIcon,liveSub;
     private String reelFilter="all",reelSide=null;
+    /** A code read while a read (poll/refresh) was in flight; replayed as soon as the bridge is free. */
+    private String[] deferredScan;
     // Reel gate (app-side only): PCB stages unlock when every server reference reel is RECEIVED, or by a local override.
     private long packagesOrder; private final List<String[]> wrongReels=new ArrayList<>();
     /** step_id|pcb_code confirmed by the server on this phone for the selected order; avoids resending (each new request is an audit record). */
@@ -51,6 +53,7 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
         schedulePoll(POLL_MS);
         if(!resumed||!serverCheckMode||order==null||!("order".equals(page)||"reels".equals(page)||"pcb".equals(page))||connection.getVisibility()==View.VISIBLE)return;
         if(SystemClock.elapsedRealtime()<pollBackoffUntil||!available()||scanBusy||pending())return;
+        if(liveOp!=null&&SystemClock.elapsedRealtime()-lastSeen<15000)return; // each check refreshes PACKAGES anyway
         try{if(bridge.send(command("PACKAGES")))pollInFlight=true;}catch(Exception ignored){}
     };
     private void schedulePoll(long ms){poller.removeCallbacks(pollTick);poller.postDelayed(pollTick,ms);}
@@ -188,7 +191,7 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
     }
     private void stopLive(){
         if(scanner!=null)scanner.stop();if(livePanel!=null){livePanel.setVisibility(View.GONE);hideResult();}
-        liveOp=null;liveStep=null;liveStation=null;scanContext=null;scanBusy=false;boardDraft=null;boardContext=null;
+        liveOp=null;liveStep=null;liveStation=null;scanContext=null;scanBusy=false;deferredScan=null;boardDraft=null;boardContext=null;
     }
     @Override public void onRequestPermissionsResult(int code,String[] permissions,int[] grants){
         super.onRequestPermissionsResult(code,permissions,grants);if(code!=83||liveOp==null)return;
@@ -216,6 +219,8 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
         if(raw.isEmpty()||raw.length()>4096||!(board?"DATA_MATRIX":"QR_CODE").equals(format)){liveState(InlineScanner.BAD,"Wrong code type — expected a "+(board?"PCB DataMatrix":"reel QR label")+". Nothing recorded.");if(!board){wrongReel(raw.length()>40?raw.substring(0,40)+"…":raw,"Wrong code type");render();}return;}
         {String lock=stepLock(liveStep);if(lock!=null){stopLive();say("Stage locked: "+lock);render();return;}}
         if(order==null||order.optLong("order_id")!=scanOrder||actor!=scanActor){stopLive();say("Order or operator changed. Choose the stage again; nothing recorded.");render();return;}
+        if(bridge!=null&&bridge.connected()&&bridge.busy()&&!pending()){
+            deferredScan=new String[]{raw,format};liveState(InlineScanner.WAIT,"Read — waiting for the server…\nA refresh is still running; this code is sent next.");return;}
         if(!board){verifyReel(raw);return;}
         if(!canWrite(liveOp)){liveState(InlineScanner.BAD,pending()?"A saved request is unresolved. Check its status first. Nothing recorded.":"Not connected or not permitted. Nothing recorded.");return;}
         try{
@@ -300,7 +305,7 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
     @Override public void ready(JSONObject s){try{session=s;actor=s.getJSONObject("user").getLong("id");retryAvailable=false;pollInFlight=false;
         // On a mode change, drop the cached list so PACKAGES is reloaded; PENDING rows then need fresh checks (no upload of local greens).
         boolean server=bridge.allowed("REEL_CHECK");if(server!=serverCheckMode){serverCheckMode=server;packagesOrder=0;packages=new JSONArray();if(liveOp!=null&&!StageRules.boardOperation(liveOp))stopLive();}say("Connected. Choose an order; no order is selected automatically.");showControls();if(!pending())loadOrders(false);}catch(Exception e){disconnected("Invalid session details.");}}
-    @Override public void disconnected(String reason){retryAvailable=false;pollInFlight=false;say(reason);
+    @Override public void disconnected(String reason){retryAvailable=false;pollInFlight=false;if(deferredScan!=null&&liveOp!=null){deferredScan=null;liveState(InlineScanner.BAD,"Not sent — connection lost.\nReconnect and scan again.");}deferredScan=null;say(reason);
         if(liveOp!=null&&scanBusy&&!destroying){scanBusy=false;boardDraft=null;hideResult();liveState(InlineScanner.BAD,reason);}
         if(!destroying&&body!=null)render();}
     private JSONObject command(String op)throws JSONException{JSONObject c=new JSONObject().put("operation",op);if(order!=null&&!"ORDERS".equals(op)&&!"REQUEST_STATUS".equals(op))c.put("order_id",order.getLong("order_id"));return c;}
@@ -357,9 +362,13 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
         if(!reelsKnown())return "Reel reference list not loaded from the server yet.";
         List<JSONObject> req=requiredFor(side);List<String> missing=missingOf(req);
         if(packages.length()==0)return overrideCovers(missing)?null:"No active package allocations returned for this order — order data is incomplete. Report it, or override with a reason.";
-        if(missing.isEmpty()||overrideCovers(missing))return null;
-        int um=0;for(JSONObject p:req)if(unmapped(p))um++;
-        return missing.size()+" of "+req.size()+(side==null?"":" "+side)+" reels not yet verified."+(um>0?" "+um+" package(s) have no side mapping — report it.":"");
+        // A package without a side mapping is incomplete order data: it blocks every side even when checked,
+        // until the server maps it (or the operator overrides with a reason) — same rule as an empty list.
+        List<String> unmappedCodes=new ArrayList<>();for(JSONObject p:req)if(unmapped(p))unmappedCodes.add(p.optString("package_code"));
+        List<String> blocking=new ArrayList<>(missing);for(String c:unmappedCodes)if(!blocking.contains(c))blocking.add(c);
+        if(blocking.isEmpty()||overrideCovers(blocking))return null;
+        if(missing.isEmpty())return unmappedCodes.size()+" package(s) have no side mapping ("+String.join(", ",unmappedCodes)+") — order data is incomplete. Report it, or override with a reason.";
+        return missing.size()+" of "+req.size()+(side==null?"":" "+side)+" reels not yet verified."+(unmappedCodes.isEmpty()?"":" "+unmappedCodes.size()+" package(s) have no side mapping — report it.");
     }
     /** Lock reason for a route step. NONE = open, SIDE = that side's reels, ALL or unknown = all reels; no field = legacy whole-order rule. */
     private String stepLock(JSONObject step){
@@ -391,7 +400,7 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
         if(sideGated()){int n=1;for(String side:gateSides()){List<JSONObject> req=requiredFor(side);int miss=missingOf(req).size(),ok=req.size()-miss;String lock=gateLock(side);
             LinearLayout sr=Ui.row(this);sr.addView(Ui.text(this,(n++)+". "+side,13.5f,Ui.TEXT,700),Ui.weight(1));
             sr.addView(Ui.text(this,ok+" / "+req.size()+"   ",13,Ui.MUTED,600));
-            sr.addView(lock==null?Ui.chip(this,"Unlocked",Ui.GREEN,Ui.GREEN_BG):Ui.chip(this,"🔒 "+miss+" left",0xFF475467,Ui.GREY_BG));c.addView(sr,Ui.block(this,12));
+            sr.addView(lock==null?Ui.chip(this,"Unlocked",Ui.GREEN,Ui.GREEN_BG):Ui.chip(this,miss>0?"🔒 "+miss+" left":"🔒 no side data",miss>0?0xFF475467:Ui.RED,miss>0?Ui.GREY_BG:Ui.RED_BG));c.addView(sr,Ui.block(this,12));
             View b2=Ui.progress(this,req.isEmpty()?1:(float)ok/req.size(),lock==null?Ui.GREEN:Ui.NAVY2);((LinearLayout.LayoutParams)b2.getLayoutParams()).topMargin=Ui.dp(this,6);c.addView(b2);}}
         if(serverCheckMode&&verified().length()>0)c.addView(Ui.text(this,verified().length()+" phone-only checks from local mode are not used; re-scan those reels.",12.5f,Ui.RED,600),Ui.block(this,10));
         if(withModeNotice)c.addView(serverCheckMode?Ui.notice(this,"Server reel check — shared with all operators, refreshed every 10 s.",Ui.NAVY2,Ui.BLUE_BG)
@@ -401,7 +410,7 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
     private void renderLockControls(){
         if(!reelsKnown())return;List<String> missing=missingReels();int total=packages.length();
         JSONObject o=reelOverride();String lock=reelLock();
-        if(sideGated()){for(String side:gateSides()){String sl=gateLock(side);if(sl==null)continue;List<String> sm=missingOf(requiredFor(side));
+        if(sideGated()){for(String side:gateSides()){String sl=gateLock(side);if(sl==null)continue;List<String> sm=new ArrayList<>(missingOf(requiredFor(side)));for(JSONObject p:requiredFor(side))if(unmapped(p)&&!sm.contains(p.optString("package_code")))sm.add(p.optString("package_code"));
                 colored(side+" stages locked: "+sl,13,Ui.RED,0);button("Override "+side+" reel lock (this phone only)…",Ui.DANGER,true,()->confirmReelOverride(sm));}
             if(o!=null)colored("Reel lock override on this phone by user "+o.optLong("actor")+" at "+o.optString("at")+" · Reason: "+o.optString("reason"),13,Ui.AMBER,Ui.AMBER_BG);}
         else if(lock!=null){colored("PCB stages locked: "+lock,13,Ui.RED,0);button("Override reel lock (this phone only)…",Ui.DANGER,true,()->confirmReelOverride(missing));}
@@ -435,6 +444,7 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
             c.addView(Ui.text(this,"New board scans wait until this is resolved. Normal warehouse production is not blocked.",12.5f,Ui.AMBER,500),Ui.block(this,4));
             if(journal.belongs(actor)){
                 c.addView(Ui.button(this,"Check saved request status",Ui.PRIMARY,available(),this::recover),Ui.block(this,10));
+                if(!available())c.addView(Ui.text(this,"Reconnect first: tap Offline (top right) or ⋮ → Sign in.",12,Ui.AMBER,600),Ui.block(this,6));
                 if(retryAvailable)c.addView(Ui.button(this,"Retry original saved request",Ui.OUTLINE,available(),()->new AlertDialog.Builder(this).setTitle("Retry the same request?").setMessage("The server found no committed result. Reuse the original request ID and exact payload?").setNegativeButton("Cancel",null).setPositiveButton("Retry original",(d,w)->retry()).show()),Ui.block(this,8));
             }else c.addView(Ui.text(this,"Sign in as the original operator to recover this request.",12.5f,Ui.AMBER,600),Ui.block(this,8));
         }
@@ -492,7 +502,7 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
             for(String side:gateSides()){List<JSONObject> req=requiredFor(side);int miss=missingOf(req).size();if(sb.length()>0)sb.append(" · ");sb.append(side.charAt(0)).append(side.substring(1).toLowerCase(Locale.US)).append(" ").append(req.size()-miss).append("/").append(req.size());
                 if(gateLock(side)==null)anyOpen=true;else if(firstLocked==null){firstLocked=side;firstMissing=miss;}}
             reelSub=sb.toString();pcbValue=firstLocked==null?stageCount+" stages":anyOpen?"Partly open":"Locked";
-            pcbSub=firstLocked==null?"All sides ready":firstLocked+" · "+firstMissing+" reels left";}
+            pcbSub=firstLocked==null?"All sides ready":firstLocked+(firstMissing>0?" · "+firstMissing+" reels left":" · side data missing");}
         else{anyOpen=lock==null;pcbValue=lock==null?stageCount+" stages":"Locked";pcbSub=lock==null?"Ready to scan":(reelsKnown()?missing.size()+" reels left":"Waiting for reels");}
         tile(r1,"🧵",Ui.GREEN_BG,"REELS",reelsKnown()?(total-missing.size())+" / "+total:"…",reelsKnown()&&total>0?(float)(total-missing.size())/total:-1,reelSub,route!=null,()->showPage("reels"),true);
         tile(r1,anyOpen?"▦":"🔒",anyOpen?Ui.BLUE_BG:Ui.GREY_BG,"PCB STAGES",pcbValue,-1,pcbSub,pcbAllowed,()->showPage("pcb"),false);
@@ -658,7 +668,8 @@ public final class OperatorActivity extends Activity implements OperatorBridge.L
     private void recover(){if(!available()||!pending()||!journal.belongs(actor))return;try{retryAvailable=false;JSONObject c=new JSONObject().put("operation","REQUEST_STATUS").put("request_id",journal.command().getJSONObject("payload").getString("request_id"));bridge.send(c);say("Checking the original saved request; no new operation is being created.");render();}catch(Exception e){say("Saved request could not be checked.");}}
     private void retry(){if(!available()||!pending()||!journal.belongs(actor)||!retryAvailable)return;try{JSONObject c=journal.command();if(!bridge.allowed(c.getString("operation"))){say("This operation is no longer permitted for this user.");return;}retryAvailable=false;bridge.send(c);say("Retrying the exact saved request. Awaiting server confirmation.");render();}catch(Exception e){say("Original request remains unresolved.");}}
     private void append(JSONArray target,JSONArray source)throws JSONException{for(int i=0;i<source.length();i++)target.put(source.getJSONObject(i));}
-    @Override public void result(JSONObject sent,int status,JSONObject data){try{
+    private void runDeferred(){if(deferredScan==null||liveOp==null){deferredScan=null;return;}String[] d=deferredScan;deferredScan=null;lastCode="";liveCode(d[0],d[1]);}
+    @Override public void result(JSONObject sent,int status,JSONObject data){if(deferredScan!=null)poller.post(this::runDeferred);try{
         String op=sent.getString("operation");
         if("PACKAGES".equals(op)&&pollInFlight){ // background refresh: quiet, never treats a failure as an empty list
             pollInFlight=false;
